@@ -9,4 +9,4 @@ and the regularization method is L1 NORM
 
 train result is as below:
 
-![Image text](https://github.com/ArtyZe/yolo_prune/result.png)
+![Image text](https://github.com/ArtyZe/yolo_prune/blob/master/result.png)
