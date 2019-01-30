@@ -1,0 +1,5 @@
+classes= 1
+train  = /home/gaoyang/Desktop/SeNet/Se_darknet/train.txt
+valid  = /home/gaoyang/Desktop/Se_darknet/scripts/2007_test.txt
+names = data/voc.names
+backup = backup
