@@ -1,21 +1,17 @@
-# compress_yolo 对yolo模型进行网络压缩、修剪等实验
+# yolo_prune
 
- 1.git clone https://github.com/hjimce/compress_yolo
- 
- 2.```cd compress_yolo```
- 
- 3.vim Makefile and  set``` PRUNE=1  MASK=1```
- 
- 4.start prune  tiny-yolo:
- 
- ```./darknet detector train cfg/coco.data cfg/tiny-yolo.cfg  pretrain/tiny-yolo.weights  -gpus 0```
- 
- 5、copy backup file trained weights and test:
- 
- ``` ./darknet detector test cfg/coco.data cfg/tiny-yolo-test.cfg pretrain/tiny-yolo_prune.weights Original.png```
+1. set weights &lt; 0.01 to 0; 
 
- 6、test mAP:
+2. pruning output feature maps according to BN scales (darknet prune)
 
- ```./darknet detector valid cfg/coco.data cfg/tiny-yolo-test.cfg pretrain/tiny-yolo_prune.weights```
- 
- There are some visulization Marcos in my code, if you want to see the prune result, just read my code and open them
+3. conv connection sparsification by using a mask of 0 and 1
+
+The first function is based on the work of https://github.com/hjimce/compress_yolo
+
+The second function is pruning feature maps according to BN scales parameter,
+
+and the regularization method is L1 NORM
+
+train result is as below:
+
+![Image text](https://github.com/ArtyZe/yolo_prune/blob/master/result.png)
