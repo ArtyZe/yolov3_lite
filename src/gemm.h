@@ -1,6 +1,13 @@
 #ifndef GEMM_H
 #define GEMM_H
 
+
+void gemm_mask(int TA, int TB, int M, int N, int K, float input_channel, 
+        float *A, int lda, 
+        float *B, int ldb,
+        float *mask_binary,
+        float *C, int ldc);
+        
 void gemm_bin(int M, int N, int K, float ALPHA, 
         char  *A, int lda, 
         float *B, int ldb,

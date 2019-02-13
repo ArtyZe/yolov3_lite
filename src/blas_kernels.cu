@@ -456,6 +456,7 @@ __global__ void copy_kernel(int N,  float *X, int OFFX, int INCX, float *Y, int 
 {
     int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
     if(i < N) Y[i*INCY + OFFY] = X[i*INCX + OFFX];
+    //printf("copy: %f\n", Y[20]);
 }
 
 __global__ void mul_kernel(int N, float *X, int INCX, float *Y, int INCY)

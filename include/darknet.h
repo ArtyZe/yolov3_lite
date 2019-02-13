@@ -131,6 +131,7 @@ struct layer{
     int n;
     int max_boxes;
     int groups;
+    int count;
     int size;
     int side;
     int stride;
@@ -214,17 +215,20 @@ struct layer{
     float * biases;
     float * bias_updates;
 
-	float * sign_scales;
+		float * sign_scales;
     float * scales;
     float * scale_updates;
 
     float * weights;
     float * weight_updates;
-	
+
 #ifdef MASK
-	float * weights_mask;
-	float * weight_mask_updates;
-#endif	
+		float * weights_mask;
+		float * weights_result;
+		float * weights_mask_binary;
+		float * weight_mask_updates;
+#endif		
+
 
     float * delta;
     float * output;
@@ -376,20 +380,22 @@ struct layer{
 
     float * x_gpu;
     float * x_norm_gpu;
+
+#ifdef MASK
+		float * weights_mask_gpu;
+		float * weights_result_gpu;
+		float * weights_mask_binary_gpu;
+		float * weight_mask_updates_gpu;
+#endif		
     float * weights_gpu;
     float * weight_updates_gpu;
     float * weight_change_gpu;
-	
-#ifdef MASK
-	float * weights_mask;
-	float * weight_mask_updates;
-#endif	
 
     float * biases_gpu;
     float * bias_updates_gpu;
     float * bias_change_gpu;
 
-	float * sign_scales_gpu;
+		float * sign_scales_gpu;
     float * scales_gpu;
     float * scale_updates_gpu;
     float * scale_change_gpu;

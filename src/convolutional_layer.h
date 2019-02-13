@@ -8,6 +8,7 @@
 #include "network.h"
 
 typedef layer convolutional_layer;
+#define IGNORENUM 0
 
 #ifdef GPU
 void forward_convolutional_layer_gpu(convolutional_layer layer, network net);

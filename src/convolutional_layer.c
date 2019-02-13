@@ -165,7 +165,7 @@ void cudnn_convolutional_setup(layer *l)
 
 convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int n, int size, int stride, int padding, ACTIVATION activation, int batch_normalize, int binary, int xnor, int adam)
 {
-    int i;
+    int i,j;
     convolutional_layer l = {0};
     l.type = CONVOLUTIONAL;
 
@@ -179,14 +179,21 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
     l.stride = stride;
     l.size = size;
     l.pad = padding;
+    l.count = adam;
     l.batch_normalize = batch_normalize;
 
     l.weights = calloc(c*n*size*size, sizeof(float));
     l.weight_updates = calloc(c*n*size*size, sizeof(float));
 
 #ifdef MASK
-	l.weights_mask = calloc(c*n, sizeof(float));
-	l.weight_mask_updates = calloc(c*n, sizeof(float));
+		l.weights_result = calloc(c*n*size*size, sizeof(float));
+		l.weights_mask = calloc(c*n, sizeof(float));
+		l.weights_mask_binary = calloc(c*n, sizeof(float));
+		l.weight_mask_updates = calloc(c*n, sizeof(float));
+		for(j = 0; j < c*n; j++){
+			l.weights_mask[j] = 1;
+			l.weights_mask_binary[j]= 1;
+		}			
 #endif
     l.biases = calloc(n, sizeof(float));
     l.bias_updates = calloc(n, sizeof(float));
@@ -266,12 +273,14 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
             l.scale_v_gpu = cuda_make_array(l.scale_v, n);
         }
 
-        l.weights_gpu = cuda_make_array(l.weights, c*n);
-        l.weight_updates_gpu = cuda_make_array(l.weights_mask_updates, c*n);
+        l.weights_gpu = cuda_make_array(l.weights, c*n*size*size);
+        l.weight_updates_gpu = cuda_make_array(l.weight_updates, c*n*size*size);
 
 #ifdef MASK
-		l.weights_mask_gpu = cuda_make_array(l.weights_mask, c*n);
-		l.weight_mask_updates_gpu = cuda_make_array(l.weight_mask_updates, c*n);
+				l.weights_result_gpu = cuda_make_array(l.weights_result, c*n*size*size);
+				l.weights_mask_gpu = cuda_make_array(l.weights_mask, c*n);
+				l.weights_mask_binary_gpu = cuda_make_array(l.weights_mask_binary, c*n);
+				l.weight_mask_updates_gpu = cuda_make_array(l.weight_mask_updates, c*n);
 #endif
         l.biases_gpu = cuda_make_array(l.biases, n);
         l.bias_updates_gpu = cuda_make_array(l.bias_updates, n);
@@ -440,12 +449,40 @@ void backward_bias(float *bias_updates, float *delta, int batch, int n, int size
     }
 }
 
+#ifdef MASK
+
+void mask_2_binary(convolutional_layer l)
+{
+	int i,j;
+	for(i = 0; i < l.batch; i++){
+		for(j = 0; j < l.c*l.n; j++){
+			int index = i*l.c*l.n + j;
+			l.weights_mask_binary[index]= l.weights_mask[index] > 0.5? 1:0;
+		}
+	}
+}
+
+void mask_weights(convolutional_layer l)
+{
+	int i,j,k;
+	for(i = 0; i < l.batch; i++){
+		for(j = 0; j < l.c*l.n; j++){
+			int mask_index = i*l.c*l.n + j; 
+			for(k = 0; k < l.size*l.size; k++){
+					int weight_index = (i*l.c*l.n + j)*l.size*l.size + k;
+					l.weights[weight_index] *= l.weights_mask_binary[mask_index];
+			}
+		}
+	}
+}
+
+#endif
+
 void forward_convolutional_layer(convolutional_layer l, network net)
 {
     int out_h = l.out_h;
     int out_w = l.out_w;
     int i;
-
     fill_cpu(l.outputs*l.batch, 0, l.output, 1);
 
     if(l.xnor){
@@ -455,6 +492,11 @@ void forward_convolutional_layer(convolutional_layer l, network net)
         net.input = l.binary_input;
     }
 
+#ifdef MASK
+		mask_2_binary(l);
+		mask_weights(l);
+#endif		
+		
     int m = l.n;
     int k = l.size*l.size*l.c;
     int n = out_h*out_w;
@@ -467,6 +509,9 @@ void forward_convolutional_layer(convolutional_layer l, network net)
     for(i = 0; i < l.batch; ++i){
         im2col_cpu(net.input, l.c, l.h, l.w, 
                 l.size, l.stride, l.pad, b);
+#ifdef MASK
+		gemm_mask(0,0,m,n,k,l.c,a,k,b,n,l.weights_mask_binary,c,n);
+#endif				
         gemm(0,0,m,n,k,1,a,k,b,n,1,c,n);
         c += n*m;
         net.input += l.c*l.h*l.w;

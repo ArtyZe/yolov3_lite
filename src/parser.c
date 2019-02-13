@@ -166,7 +166,7 @@ layer parse_deconvolutional(list *options, size_params params)
 }
 
 
-convolutional_layer parse_convolutional(list *options, size_params params)
+convolutional_layer parse_convolutional(list *options, size_params params, int count)
 {
     int n = option_find_int(options, "filters",1);
     int size = option_find_int(options, "size",1);
@@ -188,7 +188,7 @@ convolutional_layer parse_convolutional(list *options, size_params params)
     int binary = option_find_int_quiet(options, "binary", 0);
     int xnor = option_find_int_quiet(options, "xnor", 0);
 
-    convolutional_layer layer = make_convolutional_layer(batch,h,w,c,n,size,stride,padding,activation, batch_normalize, binary, xnor, params.net.adam);
+    convolutional_layer layer = make_convolutional_layer(batch,h,w,c,n,size,stride,padding,activation, batch_normalize, binary, xnor, count);
     layer.flipped = option_find_int_quiet(options, "flipped", 0);
     layer.dot = option_find_float_quiet(options, "dot", 0);
 
@@ -661,7 +661,7 @@ network parse_network_cfg(char *filename)
         layer l = {0};
         LAYER_TYPE lt = string_to_layer_type(s->type);
         if(lt == CONVOLUTIONAL){
-            l = parse_convolutional(options, params);
+            l = parse_convolutional(options, params, count);
         }else if(lt == DECONVOLUTIONAL){
             l = parse_deconvolutional(options, params);
         }else if(lt == LOCAL){
@@ -847,6 +847,9 @@ void save_convolutional_weights(layer l, FILE *fp)
         fwrite(l.rolling_mean, sizeof(float), l.n, fp);
         fwrite(l.rolling_variance, sizeof(float), l.n, fp);
     }
+#ifdef MASK    
+		fwrite(l.weights_mask, sizeof(float), l.c*l.n, fp);
+#endif
 		int i;
 		for(i=0; i<num; i++){
 			if(l.weights[i]==0){
@@ -1069,7 +1072,12 @@ void load_convolutional_weights(layer l, FILE *fp)
             fill_cpu(l.n, 0, l.rolling_variance, 1);
         }
     }
+
+#ifdef MASK    
+		fread(l.weights_mask, sizeof(float), l.c*l.n, fp);
+#endif 
     fread(l.weights, sizeof(float), num, fp);
+      
 /*#ifdef PRUNE
     for (int i = 0; i < num; ++i) {
         if (l.weights[i]<0.001){

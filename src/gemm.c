@@ -61,6 +61,51 @@ void time_random_matrix(int TA, int TB, int m, int k, int n)
     free(c);
 }
 
+void gemm_mask(int TA, int TB, int M, int N, int K, float input_channel, 
+        float *A, int lda, 
+        float *B, int ldb,
+        float *mask_binary,
+        float *C, int ldc)
+{
+	  int i,j,k,s;
+	  int size = k/input_channel;
+
+#if 0    
+		printf("##########################3##########################\n");
+		int pruneNum=0;
+		for(i=0;i<lda;i++){
+		   if(A[i]==0){
+		       pruneNum++;
+		   }         
+		}
+		printf("PruneNum:%d Prune percentage:%d%%\n",pruneNum,pruneNum*100/lda);
+#endif 
+
+		//printf("M:%d N:%d K:%d lda:%d ldb:%d ldc:%d\n",M,N,K,lda,ldb,ldc);
+
+		
+		for(i = 0; i < M; ++i){
+			for(s = 0; s < input_channel; s++){
+				int mask_index = i*input_channel + s;
+				if(mask_binary[mask_index] == 0){
+					continue;
+				}else{
+			  	for(k = 0; k < size; ++k){
+			    	register float A_PART;
+						if(A[i*lda + s*size + k]==0){
+						  continue;
+						}else{
+						  A_PART= A[i*lda + s*size + k];
+						  for(j = 0; j < N; ++j){
+						      C[i*ldc+j] += A_PART*B[size*k*s*ldb + k*ldb + j];
+						 	}
+				  	}
+			  	}
+		  	}
+			}
+		}
+}
+
 
 void gemm(int TA, int TB, int M, int N, int K, float ALPHA, 
         float *A, int lda, 
