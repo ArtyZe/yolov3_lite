@@ -4,7 +4,7 @@
  
  2.```cd compress_yolo```
  
- 3.vim Makefile and  set``` PRUNE=1```
+ 3.vim Makefile and  set``` PRUNE=1  MASK=1```
  
  4.start prune  tiny-yolo:
  
@@ -12,14 +12,10 @@
  
  5、copy backup file trained weights and test:
  
-``` ./darknet detector test cfg/coco.data cfg/tiny-yolo-test.cfg pretrain/tiny-yolo_prune.weights data/dog.jpg```
+ ``` ./darknet detector test cfg/coco.data cfg/tiny-yolo-test.cfg pretrain/tiny-yolo_prune.weights Original.png```
 
-6、test mAP:
+ 6、test mAP:
 
-```./darknet detector valid cfg/coco.data cfg/tiny-yolo-test.cfg pretrain/tiny-yolo_prune.weights```
-
-compress the coco_results.json in results file and commit to https://competitions.codalab.org/competitions/5181#participate-submit_results
-
-123
-
-实验结果：64M compress to 18M
+ ```./darknet detector valid cfg/coco.data cfg/tiny-yolo-test.cfg pretrain/tiny-yolo_prune.weights```
+ 
+ There are some visulization Marcos in my code, if you want to see the prune result, just read my code and open them
