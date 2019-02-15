@@ -1074,7 +1074,7 @@ void load_convolutional_weights(layer l, FILE *fp)
     }
 
 #ifdef MASK    
-		fread(l.weights_mask, sizeof(float), l.c*l.n, fp);
+	fread(l.weights_mask, sizeof(float), l.c*l.n, fp);
 #endif 
     fread(l.weights, sizeof(float), num, fp);
       

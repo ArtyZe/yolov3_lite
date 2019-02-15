@@ -2,7 +2,7 @@
 #define GEMM_H
 
 
-void gemm_mask(int TA, int TB, int M, int N, int K, float input_channel, 
+void gemm_mask(int TA, int TB, int M, int N, int K, int input_channel, 
         float *A, int lda, 
         float *B, int ldb,
         float *mask_binary,

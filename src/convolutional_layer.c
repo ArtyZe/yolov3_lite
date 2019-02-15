@@ -180,6 +180,7 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
     l.size = size;
     l.pad = padding;
     l.count = adam;
+    adam = 0;
     l.batch_normalize = batch_normalize;
 
     l.weights = calloc(c*n*size*size, sizeof(float));
@@ -277,10 +278,10 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
         l.weight_updates_gpu = cuda_make_array(l.weight_updates, c*n*size*size);
 
 #ifdef MASK
-				l.weights_result_gpu = cuda_make_array(l.weights_result, c*n*size*size);
-				l.weights_mask_gpu = cuda_make_array(l.weights_mask, c*n);
-				l.weights_mask_binary_gpu = cuda_make_array(l.weights_mask_binary, c*n);
-				l.weight_mask_updates_gpu = cuda_make_array(l.weight_mask_updates, c*n);
+		l.weights_result_gpu = cuda_make_array(l.weights_result, c*n*size*size);
+		l.weights_mask_gpu = cuda_make_array(l.weights_mask, c*n);
+		l.weights_mask_binary_gpu = cuda_make_array(l.weights_mask_binary, c*n);
+		l.weight_mask_updates_gpu = cuda_make_array(l.weight_mask_updates, c*n);
 #endif
         l.biases_gpu = cuda_make_array(l.biases, n);
         l.bias_updates_gpu = cuda_make_array(l.bias_updates, n);
@@ -491,12 +492,12 @@ void forward_convolutional_layer(convolutional_layer l, network net)
         binarize_cpu(net.input, l.c*l.h*l.w*l.batch, l.binary_input);
         net.input = l.binary_input;
     }
-
+/*
 #ifdef MASK
 		mask_2_binary(l);
 		mask_weights(l);
 #endif		
-		
+*/		
     int m = l.n;
     int k = l.size*l.size*l.c;
     int n = out_h*out_w;
@@ -510,9 +511,31 @@ void forward_convolutional_layer(convolutional_layer l, network net)
         im2col_cpu(net.input, l.c, l.h, l.w, 
                 l.size, l.stride, l.pad, b);
 #ifdef MASK
-		gemm_mask(0,0,m,n,k,l.c,a,k,b,n,l.weights_mask_binary,c,n);
-#endif				
+	//if(l.count > IGNORENUM){
+	
+	gemm_mask(l.size*l.size,l.c,m,n,k,l.c,a,k,b,n,l.weights_mask,c,n);
+#if 0			
+	//printf("c is: %d, n is: %d, batch is: %d, size is: %d\n", l.c, l.n, l.batch, l.size); 
+	int m = 0, n = 0, zero_num_mask = 0, zero_weights = 0;
+	for(m = 0; m < l.c*l.n; m++){
+		float sum = 0;
+		if(l.weights_mask[m] == 0){
+			zero_num_mask = zero_num_mask + 1;
+		}
+		for(n = 0; n < l.size*l.size; n++){
+			sum += l.weights[m*l.size*l.size + n];
+		}
+		if(sum == 0){
+			zero_weights = zero_weights + 1;
+		}
+	}
+	printf("channel: %d, prune connection: %d, ration: %f\n", l.c*l.n, zero_num_mask, (float)zero_num_mask/(l.c*l.n));
+	//printf("channel: %d, prune connection: %d, ration: %f\n", l.c*l.n, zero_weights, (float)(zero_weights)/(l.c*l.n));
+#endif	
+	//}
+#else				
         gemm(0,0,m,n,k,1,a,k,b,n,1,c,n);
+#endif
         c += n*m;
         net.input += l.c*l.h*l.w;
     }

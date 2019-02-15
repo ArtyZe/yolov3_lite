@@ -231,24 +231,19 @@ void update_network(network net)
     a.t = *net.t;
     int sum_zero_num=0;
     int sum_all_num=0;
-    printf("error 0\n");
     for(i = 0; i < net.n; ++i){
         layer l = net.layers[i];
-        printf("error 1\n");
         if(l.type==CONVOLUTIONAL){
             #ifdef PRUNE
-            printf("error 2\n");
             int layer_zero_num=prune_convolutional_layer(l);
             sum_zero_num+=layer_zero_num;
             sum_all_num+=l.size*l.size*l.c*l.n;
             #endif
 
         }
-        printf("error 3\n");
         if(l.update){
             l.update(l, a);
         }
-        printf("error 4\n");
     }
     fprintf(stderr, "prune zeros:%d,all:%d\n",sum_zero_num,sum_all_num);
 }

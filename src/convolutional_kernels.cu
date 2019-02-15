@@ -228,12 +228,13 @@ void forward_convolutional_layer_gpu(convolutional_layer l, network net)
 #else
 
 #ifdef MASK
-	if(l.count > IGNORENUM){
+	if(l.count >= IGNORENUM){
 		copy_gpu(l.c*l.n*l.size*l.size, l.weights_gpu, 1, l.weights_result_gpu, 1);
 			  //	int N, int channel, int size, float *weights, float *weights_mask, float *weights_mask_binary, float threhold, int key)
 		mask_weights_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_gpu, l.weights_mask_gpu, l.weights_mask_binary_gpu, 0.5, 0);
 #if 0			
 		//printf("c is: %d, n is: %d, batch is: %d, size is: %d\n", l.c, l.n, l.batch, l.size); 
+		printf("this is %d layer\n", l.count);
 		cuda_pull_array(l.weights_mask_gpu, l.weights_mask, l.c*l.n);
 		cuda_pull_array(l.weights_gpu, l.weights, l.c*l.n*l.size*l.size);
 		int m = 0, n = 0, zero_num_mask = 0, zero_weights = 0;
@@ -386,8 +387,8 @@ void backward_convolutional_layer_gpu(convolutional_layer l, network net)
         gemm_gpu(0,1,m,n,k,1,a + i*m*k,k,b,k,1,c,n);
 #if MASK
 		//(int N, int channel, int size, float *weights_result, float *weight_updates, float *weights_mask, float *mask_updates)
-		if(l.count > IGNORENUM){
-
+		if(l.count >= IGNORENUM){
+			//printf("this is %d layer BACKWARD\n", l.count);
 			//mask_backward_weights_gpu(l.c*l.n*l.batch, l.c*l.n,  l.size, l.weight_updates_gpu, l.weights_mask_gpu); 
 			mask_backward_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_result_gpu, l.weight_updates_gpu, l.weights_mask_gpu, l.weight_mask_updates_gpu);
 			copy_gpu(l.c*l.n*l.size*l.size, l.weights_result_gpu, 1, l.weights_gpu, 1);
@@ -499,6 +500,7 @@ void update_convolutional_layer_gpu(layer l, update_args a)
         axpy_gpu(l.n, learning_rate/batch, l.bias_updates_gpu, 1, l.biases_gpu, 1);
         scal_gpu(l.n, momentum, l.bias_updates_gpu, 1);
 #ifdef MASK
+		//printf("this is %d layer UPDATE\n", l.count);
 		cuda_pull_array(l.weight_mask_updates_gpu, l.weight_mask_updates, l.c*l.n);
 		qsort(l.weight_mask_updates, l.c*l.n, sizeof(float), cmp);
 		float threshold = l.weight_mask_updates[(int)(l.c*l.n*0.1)];
@@ -511,9 +513,9 @@ void update_convolutional_layer_gpu(layer l, update_args a)
 			printf("the channel is %d, ort is %d, threshold value is %f\n", l.c*l.n, (int)(l.c*l.n*0.2), threshold);
 		}
 #endif
-		if(l.count > IGNORENUM){
-				//mask_backward_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_result_gpu, l.delta_gpu, l.weights_mask_gpu, l.weight_mask_updates_gpu);
-				mask_update_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_mask_gpu, l.weight_mask_updates_gpu, threshold);
+		if(l.count >= IGNORENUM){
+			//mask_backward_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_result_gpu, l.delta_gpu, l.weights_mask_gpu, l.weight_mask_updates_gpu);
+			mask_update_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_mask_gpu, l.weight_mask_updates_gpu, threshold);
 		}
 #endif        
         if(l.scales_gpu){

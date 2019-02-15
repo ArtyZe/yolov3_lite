@@ -60,50 +60,67 @@ void time_random_matrix(int TA, int TB, int m, int k, int n)
     free(b);
     free(c);
 }
+/*
+    int m = l.n;
+    int k = l.size*l.size*l.c;
+    int n = out_h*out_w;
 
-void gemm_mask(int TA, int TB, int M, int N, int K, float input_channel, 
+
+    float *a = l.weights;
+    float *b = net.workspace;
+    float *c = l.output;
+
+    for(i = 0; i < l.batch; ++i){
+        im2col_cpu(net.input, l.c, l.h, l.w, 
+                l.size, l.stride, l.pad, b);
+#ifdef MASK
+		gemm_mask(0,0,m,n,k,l.c,a,k,b,n,l.weights_mask,c,n);
+
+*/
+
+void gemm_mask(int TA, int TB, int M, int N, int K, int input_channel, 
         float *A, int lda, 
         float *B, int ldb,
         float *mask_binary,
         float *C, int ldc)
 {
-	  int i,j,k,s;
-	  int size = k/input_channel;
+	int i,j,k,s;
+	int size = TA;
 
 #if 0    
-		printf("##########################3##########################\n");
-		int pruneNum=0;
-		for(i=0;i<lda;i++){
-		   if(A[i]==0){
-		       pruneNum++;
-		   }         
-		}
-		printf("PruneNum:%d Prune percentage:%d%%\n",pruneNum,pruneNum*100/lda);
+	printf("##########################3##########################\n");
+	int pruneNum=0;
+	for(i=0;i<lda;i++){
+	   if(A[i]==0){
+	       pruneNum++;
+	   }         
+	}
+	printf("PruneNum:%d Prune percentage:%d%%\n",pruneNum,pruneNum*100/lda);
 #endif 
 
-		//printf("M:%d N:%d K:%d lda:%d ldb:%d ldc:%d\n",M,N,K,lda,ldb,ldc);
+	//printf("M:%d N:%d K:%d lda:%d ldb:%d ldc:%d size: %d, input_channel: %d\n",M,N,K,lda,ldb,ldc,size,TB);
 
 		
-		for(i = 0; i < M; ++i){
-			for(s = 0; s < input_channel; s++){
-				int mask_index = i*input_channel + s;
-				if(mask_binary[mask_index] == 0){
-					continue;
-				}else{
-			  	for(k = 0; k < size; ++k){
-			    	register float A_PART;
-						if(A[i*lda + s*size + k]==0){
-						  continue;
-						}else{
-						  A_PART= A[i*lda + s*size + k];
-						  for(j = 0; j < N; ++j){
-						      C[i*ldc+j] += A_PART*B[size*k*s*ldb + k*ldb + j];
-						 	}
-				  	}
-			  	}
-		  	}
-			}
-		}
+	for(i = 0; i < M; ++i){
+		for(s = 0; s < TB; s++){
+		if(mask_binary[i*TB + s] == 0){
+			//printf("continue\n");
+			continue;
+		}else{
+		  	for(k = 0; k < size; ++k){
+		    	register float A_PART;
+				//if(A[i*lda + s*size + k]==0){
+				//	continue;
+				//}else{
+					  A_PART= A[i*lda + s*size + k];
+					  for(j = 0; j < N; ++j){
+					      C[i*ldc+j] += A_PART*B[size*s*ldb + k*ldb + j];
+					  }
+		  		//}
+	  		}
+	  		}
+  		}
+	}
 }
 
 
@@ -113,8 +130,29 @@ void gemm(int TA, int TB, int M, int N, int K, float ALPHA,
         float BETA,
         float *C, int ldc)
 {
+	//printf("##########################3##########################\n");
+
     gemm_cpu( TA,  TB,  M, N, K, ALPHA,A,lda, B, ldb,BETA,C,ldc);
 }
+
+/*
+    int m = l.n;
+    int k = l.size*l.size*l.c;
+    int n = out_h*out_w;
+
+
+    float *a = l.weights;
+    float *b = net.workspace;
+    float *c = l.output;
+
+    for(i = 0; i < l.batch; ++i){
+        im2col_cpu(net.input, l.c, l.h, l.w, 
+                l.size, l.stride, l.pad, b);
+#ifdef MASK
+		gemm_mask(0,0,m,n,k,l.c,a,k,b,n,l.weights_mask,c,n);
+
+*/
+
 
 void gemm_nn(int M, int N, int K, float ALPHA, 
         float *A, int lda, 
@@ -138,6 +176,7 @@ void gemm_nn(int M, int N, int K, float ALPHA,
     for(i = 0; i < M; ++i){
 	    for(k = 0; k < K; ++k){
         register float A_PART;
+#ifdef PRUNE        
          if(A[i*lda+k]==0){
             continue;
          }
@@ -147,6 +186,12 @@ void gemm_nn(int M, int N, int K, float ALPHA,
                 C[i*ldc+j] += A_PART*B[k*ldb+j];
          		}
       	 }
+#else
+	A_PART= ALPHA*A[i*lda+k];
+            for(j = 0; j < N; ++j){
+                C[i*ldc+j] += A_PART*B[k*ldb+j];
+         		}
+#endif         		
 	     }
     }
 }
