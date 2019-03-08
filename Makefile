@@ -1,10 +1,13 @@
 PRUNE=1
-GPU=1
+GPU=0
 CUDNN=0
 OPENCV=0
 DEBUG=0
 SCALE_L1=1
 MASK=1
+LAYER_MASK=0
+MULTI_CORE=1
+
 
 ARCH= -gencode arch=compute_30,code=sm_30 \
       -gencode arch=compute_35,code=sm_35 \
@@ -67,6 +70,16 @@ endif
 ifeq ($(MASK), 1) 
 COMMON+= -DMASK
 CFLAGS+= -DMASK
+endif
+
+ifeq ($(LAYER_MASK), 1) 
+COMMON+= -DMASK
+CFLAGS+= -DMASK
+endif
+
+ifeq ($(MULTI_CORE), 1) 
+CFLAGS+= -fopenmp
+LDFLAGS+= -lgomp
 endif
 
 OBJ=gemm.o utils.o cuda.o deconvolutional_layer.o convolutional_layer.o list.o image.o activations.o im2col.o col2im.o blas.o crop_layer.o dropout_layer.o maxpool_layer.o softmax_layer.o data.o matrix.o network.o connected_layer.o cost_layer.o parser.o option_list.o detection_layer.o route_layer.o box.o normalization_layer.o avgpool_layer.o layer.o local_layer.o shortcut_layer.o activation_layer.o rnn_layer.o gru_layer.o crnn_layer.o demo.o batchnorm_layer.o region_layer.o reorg_layer.o tree.o  lstm_layer.o
