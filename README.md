@@ -18,5 +18,6 @@ test result is:
 YOLO2  
 	Before   Runtime: 15s, mAP: 0.62  
 	After    Runtime: 2s,  mAP: 0.57  
+	when I test tiny-yolo, the runtime can reduced to < 1s in CPU
 
 If you want to use my code, please let me know
