@@ -9,6 +9,8 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+#include <omp.h>
+
 
 layer make_region_layer(int batch, int w, int h, int n, int classes, int coords)
 {
@@ -372,59 +374,82 @@ void get_region_boxes(layer l, int w, int h, int netw, int neth, float thresh, f
             l.output[i] = (l.output[i] + flip[i])/2.;
         }
     }
-    for (i = 0; i < l.w*l.h; ++i){
-        int row = i / l.w;
-        int col = i % l.w;
-        for(n = 0; n < l.n; ++n){
-            int index = n*l.w*l.h + i;
-            for(j = 0; j < l.classes; ++j){
-                probs[index][j] = 0;
-            }
-            int obj_index = entry_index(l, 0, n*l.w*l.h + i, l.coords);
-            int box_index = entry_index(l, 0, n*l.w*l.h + i, 0);
-            float scale = l.background ? 1 : predictions[obj_index];
-            boxes[index] = get_region_box(predictions, l.biases, n, box_index, col, row, l.w, l.h, l.w*l.h);
+    //#pragma omp parallel num_threads(8) 
+    {
+	    for (i = 0; i < l.w*l.h; ++i){
+	        int row = i / l.w;
+	        int col = i % l.w;
+	        #pragma omp  sections
+	        {
+				#pragma omp section
+				{
+	        //#pragma omp parallel for num_threads(8)
+				for(n = 0; n < l.n; ++n){
+					int index = n*l.w*l.h + i; //the n-th anchor box
+					for(j = 0; j < l.classes; ++j){
+						probs[index][j] = 0;  //set the initial value of classes to 0
+					}
+					//printf("parelle computing thread = %d  anchor box = %d index = %d\n", omp_get_thread_num(), n, index);
+					int obj_index = entry_index(l, 0, n*l.w*l.h + i, l.coords);
+					int box_index = entry_index(l, 0, n*l.w*l.h + i, 0);
+					float scale = l.background ? 1 : predictions[obj_index];	            
+					//calculate the position of box relative to current anchor box 
+					boxes[index] = get_region_box(predictions, l.biases, n, box_index, col, row, l.w, l.h, l.w*l.h);
+				}
+				}
+				#pragma omp section
+				{
+				//#pragma omp parallel for num_threads(8)
+				for(n = 0; n < l.n; ++n){ 
+					int index = n*l.w*l.h + i; //the n-th anchor box  
+					int obj_index = entry_index(l, 0, n*l.w*l.h + i, l.coords);
+					int class_index = entry_index(l, 0, n*l.w*l.h + i, l.coords + !l.background);   
+					float scale = l.background ? 1 : predictions[obj_index];
+					if(l.softmax_tree){
 
-            int class_index = entry_index(l, 0, n*l.w*l.h + i, l.coords + !l.background);
-            if(l.softmax_tree){
-
-                hierarchy_predictions(predictions + class_index, l.classes, l.softmax_tree, 0, l.w*l.h);
-                if(map){
-                    for(j = 0; j < 200; ++j){
-                        int class_index = entry_index(l, 0, n*l.w*l.h + i, l.coords + 1 + map[j]);
-                        float prob = scale*predictions[class_index];
-                        probs[index][j] = (prob > thresh) ? prob : 0;
-                    }
-                } else {
-                    int j =  hierarchy_top_prediction(predictions + class_index, l.softmax_tree, tree_thresh, l.w*l.h);
-                    probs[index][j] = (scale > thresh) ? scale : 0;
-                    probs[index][l.classes] = scale;
-                }
-            } else {
-                float max = 0;
-                for(j = 0; j < l.classes; ++j){
-                    int class_index = entry_index(l, 0, n*l.w*l.h + i, l.coords + 1 + j);
-                    float prob = scale*predictions[class_index];
-                    probs[index][j] = (prob > thresh) ? prob : 0;
-                    if(prob > max) max = prob;
-                    // TODO REMOVE
-                    // if (j == 56 ) probs[index][j] = 0; 
-                    /*
-                       if (j != 0) probs[index][j] = 0; 
-                       int blacklist[] = {121, 497, 482, 504, 122, 518,481, 418, 542, 491, 914, 478, 120, 510,500};
-                       int bb;
-                       for (bb = 0; bb < sizeof(blacklist)/sizeof(int); ++bb){
-                       if(index == blacklist[bb]) probs[index][j] = 0;
-                       }
-                     */
-                }
-                probs[index][l.classes] = max;
-            }
-            if(only_objectness){
-                probs[index][0] = scale;
-            }
-        }
+						hierarchy_predictions(predictions + class_index, l.classes, l.softmax_tree, 0, l.w*l.h);
+						if(map){
+							for(j = 0; j < 200; ++j){
+								int class_index = entry_index(l, 0, n*l.w*l.h + i, l.coords + 1 + map[j]);
+								float prob = scale*predictions[class_index];
+								probs[index][j] = (prob > thresh) ? prob : 0;
+							}
+						} else {
+							int j =  hierarchy_top_prediction(predictions + class_index, l.softmax_tree, tree_thresh, l.w*l.h);
+							probs[index][j] = (scale > thresh) ? scale : 0;
+							probs[index][l.classes] = scale;
+						}
+					} else {
+						float max = 0;
+						#pragma omp lastprivate(max)
+						for(j = 0; j < l.classes; ++j){
+							int class_index = entry_index(l, 0, n*l.w*l.h + i, l.coords + 1 + j);
+							//calculate probility for all classes
+							float prob = scale*predictions[class_index];
+							probs[index][j] = (prob > thresh) ? prob : 0;
+							if(prob > max) max = prob;
+							// TODO REMOVE
+							// if (j == 56 ) probs[index][j] = 0; 
+							/*
+							   if (j != 0) probs[index][j] = 0; 
+							   int blacklist[] = {121, 497, 482, 504, 122, 518,481, 418, 542, 491, 914, 478, 120, 510,500};
+							   int bb;
+							   for (bb = 0; bb < sizeof(blacklist)/sizeof(int); ++bb){
+							   if(index == blacklist[bb]) probs[index][j] = 0;
+							   }
+							 */
+						}
+						probs[index][l.classes] = max;
+					}	            
+					if(only_objectness){
+						probs[index][0] = scale;
+					}
+				}
+			}
+			}
+	    }
     }
+    #pragma omp master
     correct_region_boxes(boxes, l.w*l.h*l.n, w, h, netw, neth, relative);
 }
 

@@ -581,7 +581,8 @@ void engine_go(char *filename, char *weightfile, int multi)
             }
             char c;
             int r;
-            int count = scanf("%c%d", &c, &r);
+            int count = 0;
+            scanf("%c%d", &c, &r);
             int player = (color[0] == 'b' || color[0] == 'B') ? 1 : -1;
             if((c == 'p' || c == 'P') && count < 2) {
                 passed = 1;

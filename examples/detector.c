@@ -571,8 +571,12 @@ void test_detector(char *datacfg, char *cfgfile, char *weightfile, char *filenam
     char buff[256];
     char *input = buff;
     int j;
+    //float run_time[100] = {0};
+    float sum_time = 0;
     float nms=.4;
-    while(1){
+    //while(1){
+		int m;
+		for(m = 0; m < 1; m++){
         if(filename){
             strncpy(input, filename, 256);
         } else {
@@ -598,6 +602,8 @@ void test_detector(char *datacfg, char *cfgfile, char *weightfile, char *filenam
         time=clock();
         network_predict(net, X);
         printf("%s: Predicted in %f seconds.\n", input, sec(clock()-time));
+        //run_time[m] = sec(clock()-time);
+		sum_time += sec(clock()-time);
         get_region_boxes(l, im.w, im.h, net.w, net.h, thresh, probs, boxes, 0, 0, hier_thresh, 1);
         if (nms) do_nms_obj(boxes, probs, l.w*l.h*l.n, l.classes, nms);
         //else if (nms) do_nms_sort(boxes, probs, l.w*l.h*l.n, l.classes, nms);
@@ -622,8 +628,10 @@ void test_detector(char *datacfg, char *cfgfile, char *weightfile, char *filenam
         free_image(sized);
         free(boxes);
         free_ptrs((void **)probs, l.w*l.h*l.n);
-        if (filename) break;
-    }
+        //if (filename) break;
+	}
+	printf("the program mean run time is %f\n", sum_time/10);
+   // }
 }
 
 void run_detector(int argc, char **argv)

@@ -185,16 +185,21 @@ convolutional_layer make_convolutional_layer(int batch, int h, int w, int c, int
 
     l.weights = calloc(c*n*size*size, sizeof(float));
     l.weight_updates = calloc(c*n*size*size, sizeof(float));
+    
+#ifdef LAYER_MASK
+	l.masks_ratio = 0.1;
+	l.masks_ratio_updates = 1;
+#endif	
 
 #ifdef MASK
-		l.weights_result = calloc(c*n*size*size, sizeof(float));
-		l.weights_mask = calloc(c*n, sizeof(float));
-		l.weights_mask_binary = calloc(c*n, sizeof(float));
-		l.weight_mask_updates = calloc(c*n, sizeof(float));
-		for(j = 0; j < c*n; j++){
-			l.weights_mask[j] = 1;
-			l.weights_mask_binary[j]= 1;
-		}			
+	l.weights_result = calloc(c*n*size*size, sizeof(float));
+	l.weights_mask = calloc(c*n, sizeof(float));
+	l.weights_mask_binary = calloc(c*n, sizeof(float));
+	l.weight_mask_updates = calloc(c*n, sizeof(float));
+	for(j = 0; j < c*n; j++){
+		l.weights_mask[j] = 1;
+		l.weights_mask_binary[j]= 1;
+	}			
 #endif
     l.biases = calloc(n, sizeof(float));
     l.bias_updates = calloc(n, sizeof(float));

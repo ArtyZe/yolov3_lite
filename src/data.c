@@ -446,7 +446,7 @@ matrix load_regression_labels_paths(char **paths, int n)
         find_replace(labelpath, ".png", ".txt", labelpath);
         
         FILE *file = fopen(labelpath, "r");
-        fscanf(file, "%f", &(y.vals[i][0]));
+        int one = fscanf(file, "%f", &(y.vals[i][0]));
         fclose(file);
     }
     return y;

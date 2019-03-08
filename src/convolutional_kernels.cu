@@ -144,7 +144,7 @@ __global__ void mask_backward_kernel(int N, int channel, int size, float *weight
 		int mask_index = b*channel + c;
 		for(s = 0; s < size*size; s++){
 				int weight_index = (b*channel + c)*size*size + s;
-				sum += weight_updates[weight_index]*weights_mask[mask_index]*weights_result[weight_index];
+				sum += weight_updates[weight_index]*weights_result[weight_index];
 		}
 		mask_updates[mask_index] += sum;
 		if(mask_updates[mask_index]<0){
@@ -482,6 +482,7 @@ void update_convolutional_layer_gpu(layer l, update_args a)
     int batch = a.batch;
 
     int size = l.size*l.size*l.c*l.n;
+    float prune_ratio[31] = {0.026, 0, 0.138, 0, 0.13, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.144, 0.145, 0.146, 0.147, 0.148, 0.149, 0.145, 0.135, 0.14, 0.132, 0.124, 0.123, 0.122, 0.12, 0.11, 0.1, 0}; 
 #ifdef PRUNE
     prune_gpu(size,l.weights_gpu,l.weight_updates_gpu,0.001,1);
 
@@ -503,14 +504,38 @@ void update_convolutional_layer_gpu(layer l, update_args a)
 		//printf("this is %d layer UPDATE\n", l.count);
 		cuda_pull_array(l.weight_mask_updates_gpu, l.weight_mask_updates, l.c*l.n);
 		qsort(l.weight_mask_updates, l.c*l.n, sizeof(float), cmp);
-		float threshold = l.weight_mask_updates[(int)(l.c*l.n*0.1)];
+#if 0		
+		char mask_value[50];
+		sprintf(mask_value, "mask_value_layer_%d.txt", l.count);
+		FILE *fp = fopen(mask_value, "w");
+		int j;
+		for(j = 0; j < l.c*l.n; j++){
+			fprintf(fp, "%f\n",l.weight_mask_updates[j]);
+		}
+		fclose(fp);
+#endif		
+
+#ifdef LAYER_MASK
+		int s = 0;
+		for(s = 0; s < (int)l.c*l.n*0.3; s++){
+			if((l.weight_mask_updates[s+1] - l.weight_mask_updates[s]) > 0.000005){
+				break;
+			}
+		}
+		l.masks_ratio = s/(l.c*l.n);		
+		float threshold = l.weight_mask_updates[(int)(l.c*l.n*l.masks_ratio)];
+#else
+		//float threshold = l.weight_mask_updates[(int)(l.c*l.n*0.05)];
+		float threshold = l.weight_mask_updates[(int)(l.c*l.n*prune_ratio[l.count/3])];
+#endif 
+
 #if 0				
 		int i;
 		for(i = 0; i < l.c*l.n; i++){
 			if(l.weight_mask_updates[i] > 0) printf("the ort is %d, mask update value is %f\n", i, l.weight_mask_updates[i]);
 		}
 		if(threshold > 0){
-			printf("the channel is %d, ort is %d, threshold value is %f\n", l.c*l.n, (int)(l.c*l.n*0.2), threshold);
+			printf("the channel is %d, ort is %d, threshold value is %f\n", l.c*l.n, (int)(l.c*l.n*prune_ratio[l.count]), threshold);
 		}
 #endif
 		if(l.count >= IGNORENUM){

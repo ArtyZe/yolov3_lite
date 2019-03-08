@@ -215,18 +215,23 @@ struct layer{
     float * biases;
     float * bias_updates;
 
-		float * sign_scales;
+	float * sign_scales;
     float * scales;
     float * scale_updates;
 
     float * weights;
     float * weight_updates;
 
+#ifdef LAYER_MASK
+	float * masks_ratio;
+	float * masks_ratio_updates;
+#endif	
+
 #ifdef MASK
-		float * weights_mask;
-		float * weights_result;
-		float * weights_mask_binary;
-		float * weight_mask_updates;
+	float * weights_mask;
+	float * weights_result;
+	float * weights_mask_binary;
+	float * weight_mask_updates;
 #endif		
 
 
