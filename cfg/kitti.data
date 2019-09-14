@@ -1,5 +1,5 @@
 classes= 1
-train  = /home/gaoyang/Desktop/yolo_prune/train.txt
+train  = /home/gaoyang/Desktop/yolov3_lite/train.txt
 valid  = /home/gaoyang/Desktop/YOLO_train/Tools/tst_image.txt
 names = data/voc.names
 backup = backup

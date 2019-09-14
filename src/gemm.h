@@ -1,6 +1,16 @@
 #ifndef GEMM_H
 #define GEMM_H
+#include "darknet.h"
 
+void gemm_nn_int8_int16(int M, int N, int K, int8_t ALPHA,
+    int8_t *A, int lda,
+    int8_t *B, int ldb,
+    int16_t *C, int ldc);
+
+void gemm_nn_int8_int16_mask(int TA, int TB, int M, int N, int K, int input_channel,
+	int8_t *A, int lda,
+	int8_t *B, int ldb, float *mask_binary,
+	int16_t *C, int ldc);
 
 void gemm_mask(int TA, int TB, int M, int N, int K, int input_channel, 
         float *A, int lda, 

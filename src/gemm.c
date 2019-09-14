@@ -1,4 +1,5 @@
 #include "gemm.h"
+#include "blas.h"
 #include "utils.h"
 #include "cuda.h"
 #include <stdlib.h>
@@ -9,13 +10,261 @@
 	#include <omp.h>
 #endif
 
+#ifdef AVX
+
+#include <ammintrin.h>
+#include <immintrin.h>
+#include <smmintrin.h>
+#include <emmintrin.h>
+
+
 #define MIN_ITERATION_NUM 4  //the minimum cycle num for every thread
 int core_num;
+
+
+__m256i _mm256_div_epi16(const __m256i va, const int b)
+{
+    __m256i vb = _mm256_set1_epi16(32768 / b);
+    return _mm256_mulhrs_epi16(va, vb);
+}
+
+
+#define INTERMEDIATE_MULT 15    // 8 or 15
+#define FINAL_MULT (R_MULT / INTERMEDIATE_MULT)
+
+// 0.89 sec
+void gemm_nn_int8_int16_conv16(int M, int N, int K, int8_t ALPHA,
+    int8_t *A, int lda,
+    int8_t *B, int ldb,
+    int16_t *C, int ldc)
+{
+    __m256i res;
+    __m256i a, b, d;
+    __m128i tmp128;
+    __m256i div256 = _mm256_set1_epi16(INTERMEDIATE_MULT);
+
+    int16_t *c_tmp = calloc(N, sizeof(int16_t));
+    int i, j, k;
+    for (i = 0; i < M; ++i) {
+        for (k = 0; k < K; ++k) {
+            register int16_t A_PART = ALPHA*A[i*lda + k];
+            a = _mm256_set1_epi16(A_PART);
+            for (j = 0; j < N - 32; j += 32) {
+                int index = k*ldb + j;
+                d = _mm256_loadu_si256((__m256i*)&B[index]);
+
+
+                tmp128 = _mm256_extractf128_si256(d, 0);// get low 128 bit
+                b = _mm256_cvtepi8_epi16(tmp128);        // int8 -> int16
+
+                b = _mm256_mullo_epi16(a, b);    // B = A * B
+
+                b = _mm256_div_epi16(b, INTERMEDIATE_MULT);    // B = (A * B) / INTERMEDIATE_MULL
+
+                res = _mm256_loadu_si256(&c_tmp[j]);        // load temp C
+                res = _mm256_add_epi16(b, res);                // (A*B) + C
+                _mm256_storeu_si256(&c_tmp[j], res);        // store temp C
+
+
+                tmp128 = _mm256_extractf128_si256(d, 1);// get high 128 bit
+                b = _mm256_cvtepi8_epi16(tmp128);        // int8 -> int16 (for low 8 bytes)
+
+                b = _mm256_mullo_epi16(a, b);    // B = A * B
+
+                b = _mm256_div_epi16(b, INTERMEDIATE_MULT);    // B = (A * B) / INTERMEDIATE_MULL
+
+                res = _mm256_loadu_si256(&c_tmp[j + 16]);    // Load next temp C
+                res = _mm256_add_epi16(b, res);                // (A*B) + C
+                _mm256_storeu_si256(&c_tmp[j + 16], res);    // store temp C
+
+                                                            //c_tmp[j] += A_PART*B[k*ldb + j];
+                                                            //C[i*ldc + j] += max_abs(A_PART*B[k*ldb + j] / (INTERMEDIATE_MULL), (256 * 128 - 1));
+            }
+
+            int prev_end = (N % 32 == 0) ? (N - 32) : (N / 32) * 32;
+            for (j = prev_end; j < N; ++j) {
+                c_tmp[j] += A_PART*B[k*ldb + j] / (INTERMEDIATE_MULT);
+            }
+        }
+        for (j = 0; j < N; ++j) {
+            C[i*ldc + j] += (c_tmp[j] / FINAL_MULT);
+            c_tmp[j] = 0;
+        }
+    }
+    free(c_tmp);
+}
+
+void gemm_nn_int8_int16_mask(int TA, int TB, int M, int N, int K, int input_channel,
+    int8_t *A, int lda,
+    int8_t *B, int ldb, float *mask_binary,
+    int16_t *C, int ldc)
+{
+    __m256i multyplied_i32, res;
+    __m256i a, b, d;
+    __m128i tmp128;
+
+    int32_t *c_tmp = calloc(N, sizeof(int32_t));
+    //printf("M:%d N:%d K:%d lda:%d ldb:%d ldc:%d size: %d, input_channel: %d\n",M,N,K,lda,ldb,ldc,TA,TB);
+    int i, j, k, s;
+    int size = TA;
+    //#pragma omp parallel for num_threads(8)
+    for(i = 0; i < M; ++i){
+        for(k = 0; k < TB; ++k){
+        	if(mask_binary[i*TB + k]== 0){
+        		continue;
+        	}else{
+        		for(s = 0; s < size; ++s){
+					//目的就是为了能够一次性计算32个weights和32个input相乘，所以这里和gemmlwp不同的在于，这里还是8bit的值相乘，只不过使用了256的寄存器，速度更快
+		            register int16_t A_PART = A[i*lda + k*size + s];
+		            a = _mm256_set1_epi16(A_PART);
+		            //导入16个uint16的weights
+		            for (j = 0; j < N - 32; j += 32) {
+		                int index = size*k*ldb + s*ldb + j;
+		                d = _mm256_loadu_si256((__m256i*)&B[index]); //totally 32 uint8 numbers
+		                tmp128 = _mm256_extractf128_si256(d, 0);// get low 128 bit, totally 16 uint8 numbers    先取出16个数来计算
+		                b = _mm256_cvtepi8_epi16(tmp128);        // int8 -> int16
+
+		                b = _mm256_mullo_epi16(a, b);    // B = A * B  这里只保存了16个结果中的低16位
+		                
+		                
+		                ////////////////////目前的问题就在于这个低16位什么意思？？？？
+		                
+		                
+		                
+		                tmp128 = _mm256_extractf128_si256(b, 0);        // get low 128 bit 取剩下16个中的8个
+		                multyplied_i32 = _mm256_cvtepi16_epi32(tmp128);    // int16 -> int32
+		                res = _mm256_loadu_si256(&c_tmp[j]);        // load temp C
+		                res = _mm256_add_epi32(multyplied_i32, res);// (A*B) + C
+		                _mm256_storeu_si256(&c_tmp[j], res);        // store temp C
+
+		                tmp128 = _mm256_extractf128_si256(b, 1);        // get high 128 bit  将刚才16个中剩下的8个再计算下
+		                multyplied_i32 = _mm256_cvtepi16_epi32(tmp128);    // int16 -> int32
+
+		                res = _mm256_loadu_si256(&c_tmp[j + 8]);    // Load next temp C
+		                res = _mm256_add_epi32(multyplied_i32, res);// (A*B) + C
+		                _mm256_storeu_si256(&c_tmp[j + 8], res);    // store temp C   将16个结果中的低16位全部保存到了c_tmp中
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+						//之后再计算d中剩下的16个数
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		                tmp128 = _mm256_extractf128_si256(d, 1);// get high 128 bit
+		                b = _mm256_cvtepi8_epi16(tmp128);        // int8 -> int16 (for low 8 bytes)
+
+		                b = _mm256_mullo_epi16(a, b);    // B = A * B
+
+		                tmp128 = _mm256_extractf128_si256(b, 0);        // get low 128 bit
+		                multyplied_i32 = _mm256_cvtepi16_epi32(tmp128);    // int16 -> int32
+
+		                res = _mm256_loadu_si256(&c_tmp[j + 16]);    // Load next temp C
+		                res = _mm256_add_epi32(multyplied_i32, res);// (A*B) + C
+		                _mm256_storeu_si256(&c_tmp[j + 16], res);    // store temp C
+
+		                tmp128 = _mm256_extractf128_si256(b, 1);        // get high 128 bit
+		                multyplied_i32 = _mm256_cvtepi16_epi32(tmp128);    // int16 -> int32
+
+		                res = _mm256_loadu_si256(&c_tmp[j + 24]);    // Load next temp C
+		                res = _mm256_add_epi32(multyplied_i32, res);// (A*B) + C
+		                _mm256_storeu_si256(&c_tmp[j + 24], res);    // store temp C
+		                                                            //c_tmp[j] += A_PART*B[k*ldb + j];	                                                            //C[i*ldc + j] += max_abs(A_PART*B[k*ldb + j] / (32), (256 * 128 - 1));
+		            }
+		            int prev_end = (N % 32 == 0) ? (N - 32) : (N / 32) * 32;
+		            for(j = prev_end; j < N; ++j){
+		                c_tmp[j] += A_PART*B[size*k*ldb + s*ldb + j];
+		            }
+	            }
+	        }
+	    }
+        for(j = 0; j < N; ++j){
+            C[i*ldc + j] += max_abs(c_tmp[j] / (R_MULT), (256 * 128 - 1));
+            c_tmp[j] = 0;
+        }
+        //free(c_tmp);
+        //for (j = 0; j < N; ++j) C[i*ldc + j] += c_tmp[j] / (R_MULT);
+    }   
+}
+
+
+// 1.15 sec
+void gemm_nn_int8_int16(int M, int N, int K, int8_t ALPHA,
+    int8_t *A, int lda,
+    int8_t *B, int ldb,
+    int16_t *C, int ldc)
+{
+    __m256i multyplied_i32, res;
+    __m256i a, b, d;
+    __m128i tmp128;
+
+    int32_t *c_tmp = calloc(N, sizeof(int32_t));
+    int i, j, k;
+    for (i = 0; i < M; ++i) {
+        for (k = 0; k < K; ++k) {
+            register int16_t A_PART = ALPHA*A[i*lda + k];
+            a = _mm256_set1_epi16(A_PART);
+            for (j = 0; j < N - 32; j += 32) {
+                int index = k*ldb + j;
+                d = _mm256_loadu_si256((__m256i*)&B[index]);
+
+                tmp128 = _mm256_extractf128_si256(d, 0);// get low 128 bit
+                b = _mm256_cvtepi8_epi16(tmp128);        // int8 -> int16
+
+                b = _mm256_mullo_epi16(a, b);    // B = A * B
+
+                tmp128 = _mm256_extractf128_si256(b, 0);        // get low 128 bit
+                multyplied_i32 = _mm256_cvtepi16_epi32(tmp128);    // int16 -> int32
+
+                res = _mm256_loadu_si256(&c_tmp[j]);        // load temp C
+                res = _mm256_add_epi32(multyplied_i32, res);// (A*B) + C
+                _mm256_storeu_si256(&c_tmp[j], res);        // store temp C
+
+                tmp128 = _mm256_extractf128_si256(b, 1);        // get high 128 bit
+                multyplied_i32 = _mm256_cvtepi16_epi32(tmp128);    // int16 -> int32
+
+                res = _mm256_loadu_si256(&c_tmp[j + 8]);    // Load next temp C
+                res = _mm256_add_epi32(multyplied_i32, res);// (A*B) + C
+                _mm256_storeu_si256(&c_tmp[j + 8], res);    // store temp C
+
+                tmp128 = _mm256_extractf128_si256(d, 1);// get high 128 bit
+                b = _mm256_cvtepi8_epi16(tmp128);        // int8 -> int16 (for low 8 bytes)
+
+                b = _mm256_mullo_epi16(a, b);    // B = A * B
+
+                tmp128 = _mm256_extractf128_si256(b, 0);        // get low 128 bit
+                multyplied_i32 = _mm256_cvtepi16_epi32(tmp128);    // int16 -> int32
+
+                res = _mm256_loadu_si256(&c_tmp[j + 16]);    // Load next temp C
+                res = _mm256_add_epi32(multyplied_i32, res);// (A*B) + C
+                _mm256_storeu_si256(&c_tmp[j + 16], res);    // store temp C
+
+                tmp128 = _mm256_extractf128_si256(b, 1);        // get high 128 bit
+                multyplied_i32 = _mm256_cvtepi16_epi32(tmp128);    // int16 -> int32
+
+                res = _mm256_loadu_si256(&c_tmp[j + 24]);    // Load next temp C
+                res = _mm256_add_epi32(multyplied_i32, res);// (A*B) + C
+                _mm256_storeu_si256(&c_tmp[j + 24], res);    // store temp C
+
+                                                            //c_tmp[j] += A_PART*B[k*ldb + j];
+                                                            //C[i*ldc + j] += max_abs(A_PART*B[k*ldb + j] / (32), (256 * 128 - 1));
+            }
+
+            int prev_end = (N % 32 == 0) ? (N - 32) : (N / 32) * 32;
+            for (j = prev_end; j < N; ++j) {
+                c_tmp[j] += A_PART*B[k*ldb + j];
+            }
+        }
+        for (j = 0; j < N; ++j) {
+            C[i*ldc + j] += max_abs(c_tmp[j] / (R_MULT), (256 * 128 - 1));
+            c_tmp[j] = 0;
+        }
+        //for (j = 0; j < N; ++j) C[i*ldc + j] += c_tmp[j] / (R_MULT);
+    }
+    free(c_tmp);
+}
 
 int compute_threads_YourOwnPc_Dynamic(int n)
 {
 	int max_thread_num = n/MIN_ITERATION_NUM;
-	core_num = omp_get_num_procs();
+	core_num = 4;
+    //core_num = omp_get_num_procs();
 	int tn = max_thread_num > core_num ? core_num : max_thread_num;
 	if(tn < 1){
 		tn = 1;
@@ -23,6 +272,10 @@ int compute_threads_YourOwnPc_Dynamic(int n)
 	//printf("You Better use %d threads\n", tn);
 	return tn;
 }
+
+#endif
+
+
 
 
 void gemm_bin(int M, int N, int K, float ALPHA, 
@@ -97,6 +350,7 @@ void time_random_matrix(int TA, int TB, int m, int k, int n)
 		gemm_mask(0,0,m,n,k,l.c,a,k,b,n,l.weights_mask,c,n);
 
 */
+	//l.size*l.size,l.c,m,n,k,l.c,a,k,b,n,l.weights_mask,c,n
 
 void gemm_mask(int TA, int TB, int M, int N, int K, int input_channel, 
         float *A, int lda, 
@@ -106,31 +360,41 @@ void gemm_mask(int TA, int TB, int M, int N, int K, int input_channel,
 {
 	int i,j,k,s;
 	int size = TA;
-
-#if 0    
-	printf("##########################3##########################\n");
-	int pruneNum=0;
-	for(i=0;i<lda;i++){
-	   if(A[i]==0){
-	       pruneNum++;
-	   }         
-	}
-	printf("PruneNum:%d Prune percentage:%d%%\n",pruneNum,pruneNum*100/lda);
-#endif 
-
+	
+/* 	 int pruneNum=0;
+     for(int p=0;p<lda;p++){
+         if(A[p]==0){
+             pruneNum++;
+         }       
+     }
+     printf("PruneNum:%d totally %d  Prune percentage:%d%%\n",pruneNum, lda, pruneNum*100/lda); */
+    
+    //printf("M:%d N:%d K:%d lda:%d ldb:%d ldc:%d\n",M,N,K,lda,ldb,ldc);
+	
+    //////////////////////////////////////////////////////////
+	///TA = l.size*l.size;
+	///TB = l.c/l.groups;
+	///M = l.n;
+	///N = out_h*out_w;
+	///K = l.size*l.size*l.c/l.groups;
+	///lda = l.size*l.size*l.c/l.groups;
+	///ldb = out_h*out_w;
+	///ldc = out_h*out_w;
+    ///size = l.size*l.size
 	//printf("M:%d N:%d K:%d lda:%d ldb:%d ldc:%d size: %d, input_channel: %d\n",M,N,K,lda,ldb,ldc,size,TB);
-
+	//////////////////////////////////////////////////////////
+	
 	#pragma omp parallel for num_threads(compute_threads_YourOwnPc_Dynamic(M*TB*size*N)) 
 	for(i = 0; i < M; ++i){
 		for(s = 0; s < TB; s++){
 			if(mask_binary[i*TB + s] == 0){
 				//printf("continue\n");
-				continue;
+				//continue;
 			}else{
-			  	for(k = 0; k < size; ++k){
+			  	for(k = 0; k < size	; ++k){
 			    	register float A_PART;
 					if(A[i*lda + s*size + k]==0){
-						continue;
+						//continue;
 					}else{
 						  A_PART= A[i*lda + s*size + k];
 						  for(j = 0; j < N; ++j){
@@ -143,36 +407,14 @@ void gemm_mask(int TA, int TB, int M, int N, int K, int input_channel,
 	}
 }
 
-
 void gemm(int TA, int TB, int M, int N, int K, float ALPHA, 
         float *A, int lda, 
         float *B, int ldb,
         float BETA,
         float *C, int ldc)
 {
-	//printf("##########################3##########################\n");
-
     gemm_cpu( TA,  TB,  M, N, K, ALPHA,A,lda, B, ldb,BETA,C,ldc);
 }
-
-/*
-    int m = l.n;
-    int k = l.size*l.size*l.c;
-    int n = out_h*out_w;
-
-
-    float *a = l.weights;
-    float *b = net.workspace;
-    float *c = l.output;
-
-    for(i = 0; i < l.batch; ++i){
-        im2col_cpu(net.input, l.c, l.h, l.w, 
-                l.size, l.stride, l.pad, b);
-#ifdef MASK
-		gemm_mask(0,0,m,n,k,l.c,a,k,b,n,l.weights_mask,c,n);
-
-*/
-
 
 void gemm_nn(int M, int N, int K, float ALPHA, 
         float *A, int lda, 
@@ -180,40 +422,23 @@ void gemm_nn(int M, int N, int K, float ALPHA,
         float *C, int ldc)
 {
     int i,j,k;
-
-#if 0    
-     printf("##########################3##########################\n");
-     int pruneNum=0;
-     for(i=0;i<lda;i++){
-         if(A[i]==0){
+    
+/*      int pruneNum=0;
+     for(int p=0;p<lda;p++){
+         if(A[p]==0){
              pruneNum++;
-         }         
+         }       
      }
-     printf("PruneNum:%d Prune percentage:%d%%\n",pruneNum,pruneNum*100/lda);
-#endif 
-
-    //printf("M:%d N:%d K:%d lda:%d ldb:%d ldc:%d\n",M,N,K,lda,ldb,ldc);
-    #pragma omp parallel for 
+     printf("PruneNum:%d totally %d  Prune percentage:%d%%\n",pruneNum,lda, pruneNum*100/lda); */
+     
+    #pragma omp parallel for
     for(i = 0; i < M; ++i){
-	    for(k = 0; k < K; ++k){
-        register float A_PART;
-#ifdef PRUNE        
-         if(A[i*lda+k]==0){
-            continue;
-         }
-         else{
-            A_PART= ALPHA*A[i*lda+k];
+        for(k = 0; k < K; ++k){
+            register float A_PART = ALPHA*A[i*lda+k];
             for(j = 0; j < N; ++j){
                 C[i*ldc+j] += A_PART*B[k*ldb+j];
-         		}
-      	 }
-#else
-	A_PART= ALPHA*A[i*lda+k];
-            for(j = 0; j < N; ++j){
-                C[i*ldc+j] += A_PART*B[k*ldb+j];
-         		}
-#endif         		
-	     }
+            }
+        }
     }
 }
 
@@ -223,7 +448,7 @@ void gemm_nt(int M, int N, int K, float ALPHA,
         float *C, int ldc)
 {
     int i,j,k;
-    #pragma omp parallel for 
+    #pragma omp parallel for
     for(i = 0; i < M; ++i){
         for(j = 0; j < N; ++j){
             register float sum = 0;
@@ -241,7 +466,7 @@ void gemm_tn(int M, int N, int K, float ALPHA,
         float *C, int ldc)
 {
     int i,j,k;
-    #pragma omp parallel for 
+    #pragma omp parallel for
     for(i = 0; i < M; ++i){
         for(k = 0; k < K; ++k){
             register float A_PART = ALPHA*A[k*lda+i];
@@ -258,7 +483,7 @@ void gemm_tt(int M, int N, int K, float ALPHA,
         float *C, int ldc)
 {
     int i,j,k;
-    #pragma omp parallel for 
+    #pragma omp parallel for
     for(i = 0; i < M; ++i){
         for(j = 0; j < N; ++j){
             register float sum = 0;
