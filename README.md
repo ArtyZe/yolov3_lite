@@ -14,7 +14,7 @@ If you know multiple threads run in arm of X86 chips, you must know `Openmp`.
 
 Next picture is how Openmp runs. It has many tricks to ensure work well between threads.
 
-![Image text](https://github.com/ArtyZe/yolo_embedded_acceleration/tree/master/images/openmp.png)
+![](https://github.com/ArtyZe/yolo_embedded_acceleration/tree/master/images/openmp.png)
 
 The result of use `openmp` in project is:
 
@@ -30,7 +30,7 @@ In this project, I referenced the paper of `Accelerating Convolutional Networks 
 
 The accelerating result of use `kernel mask` in project is:
 
-![Image text](https://github.com/ArtyZe/yolo_embedded_acceleration/tree/master/images/1.png)
+![](https://github.com/ArtyZe/yolo_embedded_acceleration/tree/master/images/1.png)
 
 
 Weights Prune
@@ -39,7 +39,7 @@ Because this method is very simple, you just need to set weights < threshold to 
 
 The accelerating result of use `< kernel mask & weights prune >` in project is:
 
-![Image text](https://github.com/ArtyZe/yolo_embedded_acceleration/tree/master/images/2.png)
+![](https://github.com/ArtyZe/yolo_embedded_acceleration/tree/master/images/2.png)
 
 
 L1 Regularization
@@ -54,7 +54,7 @@ If you want to know more about L2 and L1 regularization in yolo, you can go to [
 
 The accelerating result of use  `L1 Regulatization` in project is:
 
-![Image text](https://github.com/ArtyZe/yolo_embedded_acceleration/tree/master/images/result.png)
+![](https://github.com/ArtyZe/yolo_embedded_acceleration/tree/master/images/result.png)
 
 Quantization
 ------------
@@ -66,7 +66,7 @@ But when I test this module, it works not good, recently I added google's quanti
 
 The accelerating result of use  `Quantization` in project is:
 
-![Image text](https://github.com/ArtyZe/yolo_embedded_acceleration/tree/master/images/3.png)
+![](https://github.com/ArtyZe/yolo_segmentation/blob/master/3.png)
 
 Depthwise Conv
 -----------
