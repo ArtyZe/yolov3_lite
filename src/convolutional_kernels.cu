@@ -1,8 +1,6 @@
 #include "cuda_runtime.h"
 #include "curand.h"
 #include "cublas_v2.h"
-
-extern "C" {
 #include "convolutional_layer.h"
 #include "batchnorm_layer.h"
 #include "gemm.h"
@@ -11,10 +9,6 @@ extern "C" {
 #include "col2im.h"
 #include "utils.h"
 #include "cuda.h"
-}
-
-//float prune_ratio[31] = {0, 0, 0.138, 0, 0.13, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.144, 0.145, 0.146, 0.147, 0.148, 0.149, 0.145, 0.135, 0.14, 0.132, 0.124, 0.123, 0.122, 0.12, 0.11, 0.1, 0};
-float prune_ratio[31] = {0, 0, 0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; 
 
 __global__ void binarize_kernel(float *x, int n, float *binary)
 {
@@ -73,178 +67,100 @@ void binarize_weights_gpu(float *weights, int n, int size, float *binary)
     check_error(cudaPeekAtLastError());
 }
 
-/**************************prune network weights*************************/
-
-__global__ void prune_kernel(int N, float *weights,float *update_weights, float threshold, int INCX)
-{
-    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
-    if(i < N) {
-        if (fabs(weights[i*INCX])<threshold){
-            weights[i*INCX]=0;
-            update_weights[i*INCX] = 0;
-        }
-    }
-}
-
-void prune_gpu(int N, float * X, float * Y, float threhold,int INCY)
-{
-    prune_kernel<<<cuda_gridsize(N), BLOCK>>>(N, X,  Y,threhold, INCY);
-    check_error(cudaPeekAtLastError());
-}
-#ifdef MASK
-
-__global__ void mask_weights_kernel(int N, int channel, int size, float *weights, float *weights_mask, float *weights_mask_binary, float threhold, int key)
-{
-    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
-    if(i < N) {
-		int s;
-		
-		int c = i%channel;  //channel
-		i /= channel;
-		int b = i;  //batch
-		int mask_index = b*channel + c;  
-		for(s = 0; s < size*size; s++){
-			int weight_index = (b*channel + c)*size*size + s;
-#if 0			
-            int zero_num = 0;            
-            if(weights_mask[mask_index] != 1){
-					printf("the mask is %f, zero num is %d\n", weights_mask[mask_index], zero_num);
-					zero_num = zero_num + 1;
-			}
-#endif			
-			weights[weight_index] *= weights_mask[mask_index];
-		}
-	}
-}
-
-//mask_weights_gpu(l.c/l.groups*l.n*l.batch, l.c/l.groups*l.n, l.size, l.weights_gpu, l.weights_mask_gpu, l.weights_mask_binary_gpu, 0.5, 0);
-void mask_weights_gpu(int N, int channel, int size, float * X, float * Y, float * Z, float threhold, int key)
-{
-    //printf("conv forward\n");
-    mask_weights_kernel<<<cuda_gridsize(N), BLOCK>>>(N, channel, size, X, Y, Z, threhold, key);
-	//printf("all connection: %d, prune connection %d, rate: %f\n", channel, zero_num, zero_num/channel);
-    check_error(cudaPeekAtLastError());
-}
-
-//l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_result_gpu, l.	, l.weights_mask_gpu, l.weight_mask_updates_gpu
-
-__global__ void mask_backward_kernel(int N, int channel, int size, float *weights_result, float *weight_updates, float *weights_mask, float *mask_updates)
-{
-    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
-    if(i < N) {
-		int s;
-		float sum =0;
-		int c = i%channel;	//channel
-		i /= channel;
-		int b = i;	//batch
-		int mask_index = b*channel + c;
-		for(s = 0; s < size*size; s++){
-            int weight_index = (b*channel + c)*size*size + s;
-            sum += weight_updates[weight_index]*weights_result[weight_index];
-		}
-		mask_updates[mask_index] += sum;
-		if(mask_updates[mask_index]<0){
-			mask_updates[mask_index]= -1 * mask_updates[mask_index];
-		}
-    }
-}
-
-//mask_backward_gpu(l.c/l.groups*l.n/l.groups*l.batch, l.c/l.groups*l.n/l.groups, l.size, l.weights_result_gpu+j*l.nweights/l.groups, l.weight_updates_gpu+j*l.nweights/l.groups, l.weights_mask_gpu+j, l.weight_mask_updates_gpu+j);
-void mask_backward_gpu(int N, int channel, int size, float * X, float * Y, float * Z, float *updates)
-{
-    //printf("conv backward\n");
-    mask_backward_kernel<<<cuda_gridsize(N), BLOCK>>>(N, channel, size, X, Y, Z, updates);
-    check_error(cudaPeekAtLastError());
-}
-
-__global__ void mask_update_kernel(int N, int channel, int size, float *weights_mask, float *mask_updates, float threshold)
-{
-    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
-    if(i < N) {
-		int c = i%channel;	//channel
-		i /= channel;
-		int b = i;	//batch
-		int mask_index = b*channel + c;
-		if(mask_updates[mask_index] >= threshold){
-			weights_mask[mask_index] = 1;
-			//if(weights_mask[mask_index] > 0.5) {
-			//printf("the threshold is %f, mask updates value is %f\n", threshold, weights_mask[mask_index]);
-			//}
-		}else{
-			weights_mask[mask_index] = 0;
-			//if(weights_mask[mask_index] > 0.5){ 
-			//printf("the mask updates value is %f\n", mask_updates[mask_index]);
-			//}
-		}
-    }
-    //if(threshold != 0) {printf("the threshold is %f\n", threshold);}
-}
-//mask_update_gpu(l.c/l.groups*l.n*l.batch, l.c/l.groups*l.n, l.size, l.weights_mask_gpu, l.weight_mask_updates_gpu, threshold);
-void mask_update_gpu(int N, int channel, int size, float * X, float * Y, float threshold)
-{
-    mask_update_kernel<<<cuda_gridsize(N), BLOCK>>>(N, channel, size, X, Y, threshold);
-    check_error(cudaPeekAtLastError());
-}
-
-#endif
 void forward_convolutional_layer_gpu(convolutional_layer l, network net)
 {
     fill_gpu(l.outputs*l.batch, 0, l.output_gpu, 1);
-    if(l.binary){
-        binarize_weights_gpu(l.weights_gpu, l.n, l.c/l.groups*l.size*l.size, l.binary_weights_gpu);
-        swap_binary(&l);
-    }
-    if(l.xnor){
-        binarize_weights_gpu(l.weights_gpu, l.n, l.c/l.groups*l.size*l.size, l.binary_weights_gpu);
-        swap_binary(&l);
-        binarize_gpu(net.input_gpu, l.c*l.h*l.w*l.batch, l.binary_input_gpu);
-        net.input_gpu = l.binary_input_gpu;
-    }
-#ifdef CUDNN
-    float one = 1;
-    cudnnConvolutionForward(cudnn_handle(),
-                &one,
-                l.srcTensorDesc,
-                net.input_gpu,
-                l.weightDesc,
-                l.weights_gpu,
-                l.convDesc,
-                l.fw_algo,
-                net.workspace,
-                l.workspace_size,
-                &one,
-                l.dstTensorDesc,
-                l.output_gpu);
-
-#else
 
 #ifdef MASK
 	if((prune_ratio[l.count] != 0) && (l.groups == 1) && (l.n != 30)){
 		copy_gpu(l.c*l.n*l.size*l.size, l.weights_gpu, 1, l.weights_result_gpu, 1);
-			  //	int N, int channel, int size, float *weights, float *weights_mask, float *weights_mask_binary, float threhold, int key)
-		mask_weights_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_gpu, l.weights_mask_gpu, l.weights_mask_binary_gpu, 0.5, 0);
-#if 0			
-		//printf("c is: %d, n is: %d, batch is: %d, size is: %d\n", l.c, l.n, l.batch, l.size); 
-		printf("this is %d layer\n", l.count);
-		cuda_pull_array(l.weights_mask_gpu, l.weights_mask, l.c*l.n);
-		cuda_pull_array(l.weights_gpu, l.weights, l.c*l.n*l.size*l.size);
-		int m = 0, n = 0, zero_num_mask = 0, zero_weights = 0;
-		for(m = 0; m < l.c*l.n; m++){
-			float sum = 0;
-			if(l.weights_mask[m] == 0){
-				zero_num_mask = zero_num_mask + 1;
-			}
-			for(n = 0; n < l.size*l.size; n++){
-				sum += l.weights[m*l.size*l.size + n];
-			}
-			if(sum == 0){
-				zero_weights = zero_weights + 1;
-			}
-		}
-		//printf("channel: %d, prune connection: %d, ration: %f\n", l.c*l.n, zero_num, (float)(zero_num)/(l.c*l.n));
-		printf("channel: %d, prune connection: %d, ration: %f\n", l.c*l.n, zero_weights, (float)(zero_weights)/(l.c*l.n));
-#endif			
+		mask_weights_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_gpu, l.weights_mask_gpu, l.weights_mask_binary_gpu, 0.5, 0);		
 	}
+#endif
+
+    int i, j;
+    int m = l.n/l.groups;
+    int k = l.size*l.size*l.c/l.groups;
+    int n = l.out_w*l.out_h;
+    for(i = 0; i < l.batch; ++i){
+        for(j = 0; j < l.groups; ++j){
+            float *a = l.weights_gpu + j*l.nweights/l.groups;
+            float *b = net.workspace;
+            float *c = l.output_gpu + (i*l.groups + j)*n*m;
+            float *im = net.input_gpu + (i*l.groups + j)*l.c/l.groups*l.h*l.w;
+
+            if (l.size == 1){
+                b = im;
+            } else {
+                im2col_gpu(im, l.c/l.groups, l.h, l.w, l.size, l.stride, l.pad, b);
+            }
+            gemm_gpu(0,0,m,n,k,1,a,k,b,n,1,c,n);
+        }
+    }
+
+    if (l.batch_normalize) {
+        forward_batchnorm_layer_gpu(l, net);
+    } else {
+        add_bias_gpu(l.output_gpu, l.biases_gpu, l.batch, l.n, l.out_w*l.out_h);
+    }
+
+    activate_array_gpu(l.output_gpu, l.outputs*l.batch, l.activation);
+}
+
+void forward_convolutional_layer_quant_gpu(convolutional_layer l, network net)
+{
+    fill_gpu(l.outputs*l.batch, 0, l.output_gpu, 1);
+    copy_gpu(l.nweights*l.batch, l.weights_gpu, 1, l.weights_bn_backup_gpu, 1);
+    copy_gpu(l.out_c*l.batch, l.biases_gpu, 1, l.biases_bn_backup_gpu, 1);
+#ifdef QUANTIZATION_GOOGLE
+
+//////////////////////////////////////////////////////////////////
+//    this process in training graph is to get
+//    the output mean and variance then use to 
+//    fold the batch norm parameters
+//////////////////////////////////////////////////////////////////
+    int train_quant_flag = l.weight_quant_flag || l.activ_quant_flag;
+
+    if(net.train && l.batch_normalize &&  train_quant_flag){
+    // if(l.batch_normalize){
+        fill_gpu(l.outputs*l.batch, 0, l.output_bn_backup_gpu, 1);
+
+        int i1, j1;
+        int m1 = l.n/l.groups;
+        int k1 = l.size*l.size*l.c/l.groups;
+        int n1 = l.out_w*l.out_h;
+        for(i1 = 0; i1 < l.batch; ++i1){
+            for(j1 = 0; j1 < l.groups; ++j1){
+                float *a1 = l.weights_gpu + j1*l.nweights/l.groups;
+                float *b1 = net.workspace;
+                float *c1 = l.output_bn_backup_gpu + (i1*l.groups + j1)*n1*m1;
+                float *im1 = net.input_gpu + (i1*l.groups + j1)*l.c/l.groups*l.h*l.w;
+
+                if (l.size == 1){
+                    b1 = im1;
+                } else {
+                    im2col_gpu(im1, l.c/l.groups, l.h, l.w, l.size, l.stride, l.pad, b1);
+                }
+                gemm_gpu(0,0,m1,n1,k1,1,a1,k1,b1,n1,1,c1,n1);
+            }
+        }
+    }
+    // flod batchnorm with conv
+    if(l.batch_normalize &&  train_quant_flag){ 
+        forward_batchnorm_layer_quant_gpu(l, net);
+    }
+
+    if(net.train && l.weight_quant_flag){
+        float min_weights_value = 0;
+        float max_weights_value = 0;
+        cuda_pull_array(l.weights_gpu, l.weights, l.c*l.n*l.size*l.size);
+        FakeQuantWithMinMaxChannel(1, l.weights, l.weights_quant, l.n*l.c*l.size*l.size, &min_weights_value, &max_weights_value, 
+                                   l.weight_data_int8_scales, l.weight_data_int8_zero_point, WEIGHT_QUANT, 0.9);
+        cuda_push_array(l.weights_gpu, l.weights, l.c*l.n*l.size*l.size);
+        cuda_push_array(l.weight_data_int8_scales_gpu, l.weight_data_int8_scales, 1);
+        cuda_push_array_int8(l.weight_data_int8_zero_point_gpu, l.weight_data_int8_zero_point, 1);
+        cuda_push_array_int8(l.weights_quant_gpu, l.weights_quant, l.c*l.n*l.size*l.size);
+    }   
 #endif
     int i, j;
     int m = l.n/l.groups;
@@ -265,16 +181,35 @@ void forward_convolutional_layer_gpu(convolutional_layer l, network net)
             gemm_gpu(0,0,m,n,k,1,a,k,b,n,1,c,n);
         }
     }
-#endif
+#ifndef QUANTIZATION_GOOGLE    
     if (l.batch_normalize) {
         forward_batchnorm_layer_gpu(l, net);
-    } else {
+    }else{
         add_bias_gpu(l.output_gpu, l.biases_gpu, l.batch, l.n, l.out_w*l.out_h);
     }
+#else
+    if (l.batch_normalize && !train_quant_flag) {
+        forward_batchnorm_layer_gpu(l, net);
+    }else{
+        add_bias_gpu(l.output_gpu, l.biases_gpu, l.batch, l.n, l.out_w*l.out_h);
+    }
+#endif    
 
     activate_array_gpu(l.output_gpu, l.outputs*l.batch, l.activation);
-    //if(l.dot > 0) dot_error_gpu(l);
-    if(l.binary || l.xnor) swap_binary(&l);
+
+    // activation quantization
+    // printf("net.train = %d, l.layer_quantized = %d, l.batch_norm = %d\n", net.train, l.layer_quantized, l.batch_normalize);
+    if(net.train && l.activ_quant_flag){
+        cuda_pull_array(l.output_gpu, l.output, l.out_c*l.out_w*l.out_h);
+        uint8_t input_fake_quant = 0;
+        FakeQuantWithMinMaxChannel(1, l.output, &input_fake_quant, l.out_c*l.out_w*l.out_h, l.min_activ_value, l.max_activ_value, 
+                                        l.activ_data_int8_scales, l.activ_data_int8_zero_point, ACTIV_QUANT, 0.999);
+        cuda_push_array(l.output_gpu, l.output, l.out_c*l.out_w*l.out_h);
+        // printf("scale is %f\n", *l.activ_data_int8_scales);
+        cuda_push_array(l.activ_data_int8_scales_gpu, l.activ_data_int8_scales, 1);
+        cuda_push_array_int8(l.activ_data_int8_zero_point_gpu, l.activ_data_int8_zero_point, 1);	
+    }
+    
 }
 
 __global__ void smooth_kernel(float *x, int n, int w, int h, int c, int size, float rate, float *delta)
@@ -307,7 +242,7 @@ __global__ void smooth_kernel(float *x, int n, int w, int h, int c, int size, fl
     }
 }
 
-extern "C" void smooth_layer(layer l, int size, float rate)
+void smooth_layer(layer l, int size, float rate)
 {
     int h = l.out_h;
     int w = l.out_w;
@@ -321,58 +256,31 @@ extern "C" void smooth_layer(layer l, int size, float rate)
 
 void backward_convolutional_layer_gpu(convolutional_layer l, network net)
 {
-    if(l.smooth){
-        smooth_layer(l, 5, l.smooth);
-    }
     //constrain_gpu(l.outputs*l.batch, 1, l.delta_gpu, 1);
     gradient_array_gpu(l.output_gpu, l.outputs*l.batch, l.activation, l.delta_gpu);
-
-    if(l.batch_normalize){
+            
+#ifndef QUANTIZATION_GOOGLE    
+    if (l.batch_normalize) {
         backward_batchnorm_layer_gpu(l, net);
-    } else {
+    }else{
         backward_bias_gpu(l.bias_updates_gpu, l.delta_gpu, l.batch, l.n, l.out_w*l.out_h);
     }
-    float *original_input = net.input_gpu;
-    if(l.xnor) net.input_gpu = l.binary_input_gpu;
-#ifdef CUDNN
-    float one = 1;
-    cudnnConvolutionBackwardFilter(cudnn_handle(),
-            &one,
-            l.srcTensorDesc,
-            net.input_gpu,
-            l.ddstTensorDesc,
-            l.delta_gpu,
-            l.convDesc,
-            l.bf_algo,
-            net.workspace,
-            l.workspace_size,
-            &one,
-            l.dweightDesc,
-            l.weight_updates_gpu);
-
-    if(net.delta_gpu){
-        if(l.binary || l.xnor) swap_binary(&l);
-        cudnnConvolutionBackwardData(cudnn_handle(),
-                &one,
-                l.weightDesc,
-                l.weights_gpu,
-                l.ddstTensorDesc,
-                l.delta_gpu,
-                l.convDesc,
-                l.bd_algo,
-                net.workspace,
-                l.workspace_size,
-                &one,
-                l.dsrcTensorDesc,
-                net.delta_gpu);
-        if(l.binary || l.xnor) swap_binary(&l);
-        if(l.xnor) gradient_array_gpu(original_input, l.batch*l.c*l.h*l.w, HARDTAN, net.delta_gpu);
-    }
-
 #else
+    int train_quant_flag = l.weight_quant_flag || l.activ_quant_flag;
+
+    if(l.batch_normalize && !train_quant_flag){
+        backward_batchnorm_layer_gpu(l, net);
+    }else{
+        backward_bias_gpu(l.bias_updates_gpu, l.delta_gpu, l.batch, l.n, l.out_w*l.out_h);
+    }
+#endif 
+
+    // float *original_input = net.input_gpu;
+
     int m = l.n/l.groups;
     int n = l.size*l.size*l.c/l.groups;
     int k = l.out_w*l.out_h;
+
     int i, j;
     for(i = 0; i < l.batch; ++i){
         for(j = 0; j < l.groups; ++j){
@@ -385,8 +293,7 @@ void backward_convolutional_layer_gpu(convolutional_layer l, network net)
 
             im2col_gpu(im, l.c/l.groups, l.h, l.w, l.size, l.stride, l.pad, b);
             gemm_gpu(0,1,m,n,k,1,a,k,b,k,1,c,n);
-#if MASK
-		//(int N, int channel, int size, float *weights_result, float *weight_updates, float *weights_mask, float *mask_updates)
+#if MASK   
             if((prune_ratio[l.count] != 0) && (l.groups == 1) && (l.n != 30)){
                 printf("l.n = %d, prune ration = %f\n", l.count, prune_ratio[l.count]);
                 //mask_backward_weights_gpu(l.c*l.n*l.batch, l.c*l.n,  l.size, l.weight_updates_gpu, l.weights_mask_gpu); 
@@ -394,7 +301,7 @@ void backward_convolutional_layer_gpu(convolutional_layer l, network net)
                 copy_gpu(l.c*l.n*l.size*l.size, l.weights_result_gpu, 1, l.weights_gpu, 1);
             }
 #endif	
-            if (net.delta_gpu) {
+            if(net.delta_gpu) {
                 if (l.binary || l.xnor) swap_binary(&l);
                 a = l.weights_gpu + j*l.nweights/l.groups;
                 b = l.delta_gpu + (i*l.groups + j)*m*k;
@@ -412,8 +319,13 @@ void backward_convolutional_layer_gpu(convolutional_layer l, network net)
                     swap_binary(&l);
                 }
             }
-            if(l.xnor) gradient_array_gpu(original_input + i*l.c*l.h*l.w, l.c*l.h*l.w, HARDTAN, net.delta_gpu + i*l.c*l.h*l.w);
         }
+    }
+   
+#ifdef QUANTIZATION_GOOGLE  
+    if(l.batch_normalize && train_quant_flag){
+//     if(l.batch_normalize && l.layer_quantized){
+        backward_batchnorm_layer_quant_gpu(l, net);
     }
 #endif
 }
@@ -426,16 +338,14 @@ void pull_convolutional_layer(layer l)
     cuda_pull_array(l.bias_updates_gpu, l.bias_updates, l.n);
 #ifdef MASK  
     cuda_pull_array(l.weights_mask_gpu, l.weights_mask, l.c*l.n);
-    cuda_pull_array(l.weight_mask_updates_gpu, l.weight_mask_updates, l.c*l.n);
-#if 0		
-	int i = 0;
-	for(i = 0; i < l.c*l.n; i++)
-	{
-		//if(l.weights_mask[i] != 1){
-			printf("the mask value is %f\n", l.weights_mask[i]);
-		//}
-	}
-#endif	
+    cuda_pull_array(l.weight_mask_updates_gpu, l.weight_mask_updates, l.c*l.n);	
+#endif
+#ifdef QUANTIZATION_GOOGLE
+    cuda_pull_array(l.activ_data_int8_scales_gpu, l.activ_data_int8_scales, 1);
+    cuda_pull_array_int8(l.activ_data_int8_zero_point_gpu, l.activ_data_int8_zero_point, 1);	
+    cuda_pull_array(l.weight_data_int8_scales_gpu, l.weight_data_int8_scales, 1);
+    cuda_pull_array_int8(l.weight_data_int8_zero_point_gpu, l.weight_data_int8_zero_point, 1);	
+    cuda_pull_array_int8(l.weights_quant_gpu, l.weights_quant, l.c*l.n*l.size*l.size);
 #endif
     if (l.batch_normalize){
         cuda_pull_array(l.scales_gpu, l.scales, l.n);
@@ -452,16 +362,14 @@ void push_convolutional_layer(layer l)
     cuda_push_array(l.bias_updates_gpu, l.bias_updates, l.n);
 #ifdef MASK    
     cuda_push_array(l.weights_mask_gpu, l.weights_mask, l.c*l.n);
-	cuda_push_array(l.weight_mask_updates_gpu, l.weight_mask_updates, l.c*l.n);
-#if 0		
-	int i = 0;
-	for(i = 0; i < l.c*l.n; i++)
-	{
-		if(l.weights_mask[i] != 1){
-			printf("the mask value is %f\n", l.weights_mask[i]);
-		}
-	}
-#endif		
+    cuda_push_array(l.weight_mask_updates_gpu, l.weight_mask_updates, l.c*l.n);		
+#endif
+#ifdef QUANTIZATION_GOOGLE
+    cuda_push_array(l.activ_data_int8_scales_gpu, l.activ_data_int8_scales, 1);
+    cuda_push_array_int8(l.activ_data_int8_zero_point_gpu, l.activ_data_int8_zero_point, 1);	
+    cuda_push_array(l.weight_data_int8_scales_gpu, l.weight_data_int8_scales, 1);
+    cuda_push_array_int8(l.weight_data_int8_zero_point_gpu, l.weight_data_int8_zero_point, 1);	
+    cuda_push_array_int8(l.weights_quant_gpu, l.weights_quant, l.c*l.n*l.size*l.size);
 #endif
     if (l.batch_normalize){
         cuda_push_array(l.scales_gpu, l.scales, l.n);
@@ -481,93 +389,37 @@ void update_convolutional_layer_gpu(layer l, update_args a)
     float decay = a.decay;
     int batch = a.batch;
 
-    int size = l.size*l.size*l.c/l.groups*l.n;
+    int train_quant_flag = l.weight_quant_flag || l.activ_quant_flag;
 
 #ifdef PRUNE
+    int size = l.size*l.size*l.c/l.groups*l.n;
     prune_gpu(size,l.weights_gpu,l.weight_updates_gpu,0.001,1);
 #endif
-    if(a.adam){
-        adam_update_gpu(l.weights_gpu, l.weight_updates_gpu, l.m_gpu, l.v_gpu, a.B1, a.B2, a.eps, decay, learning_rate, l.nweights, batch, a.t);
-        adam_update_gpu(l.biases_gpu, l.bias_updates_gpu, l.bias_m_gpu, l.bias_v_gpu, a.B1, a.B2, a.eps, decay, learning_rate, l.n, batch, a.t);
-        if(l.scales_gpu){
-            adam_update_gpu(l.scales_gpu, l.scale_updates_gpu, l.scale_m_gpu, l.scale_v_gpu, a.B1, a.B2, a.eps, decay, learning_rate, l.n, batch, a.t);
-        }
-    }else{
-        axpy_gpu(l.nweights, -decay*batch, l.weights_gpu, 1, l.weight_updates_gpu, 1);
-        axpy_gpu(l.nweights, learning_rate/batch, l.weight_updates_gpu, 1, l.weights_gpu, 1);
-        scal_gpu(l.nweights, momentum, l.weight_updates_gpu, 1);
-        axpy_gpu(l.n, learning_rate/batch, l.bias_updates_gpu, 1, l.biases_gpu, 1);
-        scal_gpu(l.n, momentum, l.bias_updates_gpu, 1);
-#ifdef MASK
-        //printf("this is %d layer UPDATE\n", l.count);
-        if((prune_ratio[l.count] != 0) && (l.groups == 1) && (l.n != 30)){
-            cuda_pull_array(l.weight_mask_updates_gpu, l.weight_mask_updates, l.c*l.n);
-            qsort(l.weight_mask_updates, l.c*l.n, sizeof(float), cmp);
-#if 0		
-		char mask_value[50];
-		sprintf(mask_value, "mask_value_layer_%d.txt", l.count);
-		FILE *fp = fopen(mask_value, "w");
-		int j;
-		for(j = 0; j < l.c*l.n; j++){
-			fprintf(fp, "%f\n",l.weight_mask_updates[j]);
-		}
-		fclose(fp);
-#endif		
 
-#ifdef LAYER_MASK
-            int s = 0;
-            for(s = 0; s < (int)l.c*l.n*0.3; s++){
-                if((l.weight_mask_updates[s+1] - l.weight_mask_updates[s]) > 0.000005){
-                    break;
-                }
-            }
-            l.masks_ratio = s/(l.c*l.n);		
-            float threshold = l.weight_mask_updates[(int)(l.c*l.n*l.masks_ratio)];
+#ifdef QUANTIZATION_GOOGLE
+    axpy_gpu(l.nweights, -decay*batch, l.weights_bn_backup_gpu, 1, l.weight_updates_gpu, 1);
+    axpy_gpu(l.nweights, learning_rate/batch, l.weight_updates_gpu, 1, l.weights_bn_backup_gpu, 1);
+    scal_gpu(l.nweights, momentum, l.weight_updates_gpu, 1);
+
+    
+    axpy_gpu(l.n, learning_rate/batch, l.bias_updates_gpu, 1, l.biases_bn_backup_gpu, 1);
+    scal_gpu(l.n, momentum, l.bias_updates_gpu, 1);
+
+    copy_gpu(l.nweights, l.weights_bn_backup_gpu, 1, l.weights_gpu, 1);
+    copy_gpu(l.out_c, l.biases_bn_backup_gpu, 1, l.biases_gpu, 1);
 #else
-		//float threshold = l.weight_mask_updates[(int)(l.c*l.n*0.05)];
-        float threshold = l.weight_mask_updates[(int)(l.c*l.n*prune_ratio[l.count])];
-#endif 
-#if 0				
-		int i;
-		for(i = 0; i < l.c/l.groups*l.n; i++){
-			if(l.weight_mask_updates[i] > 0) printf("the ort is %d, mask update value is %f\n", i, l.weight_mask_updates[i]);
-		}
-		if(threshold > 0){
-			printf("the channel is %d, ort is %d, threshold value is %f\n", l.c/l.groups*l.n, (int)(l.c/l.groups*l.n*prune_ratio[l.count]), threshold);
-		}
-#endif
-			//mask_backward_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_result_gpu, l.delta_gpu, l.weights_mask_gpu, l.weight_mask_updates_gpu);
-			mask_update_gpu(l.c*l.n*l.batch, l.c*l.n, l.size, l.weights_mask_gpu, l.weight_mask_updates_gpu, threshold);
-		}
-#endif      
-        if(l.scales_gpu){
-#ifdef SCALE_L1
-        cuda_pull_array(l.scales_gpu, l.scales, l.n);
-        int i;
-        int zero_Num = 0;
-        for(i = 0; i < l.n; i++)
-        {
-            l.sign_scales[i]= l.scales > 0 ? 1:-1;
-            if(l.scales[i] < 0.5)
-            {
-                    zero_Num++;
-                    //printf("Prune Number: %d, Value: %f\n", zero_Num, l.scales[i]);
-            }
-        }
-#if 0
-			printf("Prune Number: %d, All: %d\n", zero_Num, l.n);
-#endif		      	
-            cuda_push_array(l.sign_scales_gpu, l.sign_scales, l.n);
+    axpy_gpu(l.nweights, -decay*batch, l.weights_gpu, 1, l.weight_updates_gpu, 1);
+    axpy_gpu(l.nweights, learning_rate/batch, l.weight_updates_gpu, 1, l.weights_gpu, 1);
+    scal_gpu(l.nweights, momentum, l.weight_updates_gpu, 1);
 
-            axpy_gpu(l.n, -decay*batch, l.sign_scales_gpu, 1, l.scale_updates_gpu, 1);   //L1 regularization	
-#endif		      	
-		        //axpy_gpu(l.n, -decay*batch, l.scales_gpu, 1, l.scale_updates_gpu, 1);   //L2 regularization	
-            axpy_gpu(l.n, learning_rate/batch, l.scale_updates_gpu, 1, l.scales_gpu, 1);
-            scal_gpu(l.n, momentum, l.scale_updates_gpu, 1);
-        }
-    }
-    if(l.clip){
-        constrain_gpu(l.nweights, l.clip, l.weights_gpu, 1);
+    
+    axpy_gpu(l.n, learning_rate/batch, l.bias_updates_gpu, 1, l.biases_gpu, 1);
+    scal_gpu(l.n, momentum, l.bias_updates_gpu, 1);
+#endif
+    if(l.scales_gpu && !train_quant_flag){		
+    // if(l.scales_gpu){	      	
+        axpy_gpu(l.n, learning_rate/batch, l.scale_updates_gpu, 1, l.scales_gpu, 1);
+        scal_gpu(l.n, momentum, l.scale_updates_gpu, 1);
     }
 }
 

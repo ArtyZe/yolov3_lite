@@ -2,11 +2,209 @@
 #include "curand.h"
 #include "cublas_v2.h"
 #include <assert.h>
-
-extern "C" {
 #include "blas.h"
 #include "cuda.h"
 #include "utils.h"
+
+__global__ void batch_normalize_weights_bias_kernel(float *weights, float * biases, float *rolling_variance, float *rolling_mean, float *scales, 
+                                                    float *variance_gpu, float *mean_gpu, int channel_size,int filter_size)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (i < channel_size){
+        if(variance_gpu[i] - rolling_variance[i] > 0.5*rolling_variance[i]){
+            // printf("the difference is %f\n", variance_gpu[i] - rolling_variance[i]);
+            rolling_variance[i] = variance_gpu[i];
+            rolling_mean[i] = mean_gpu[i];
+        }
+        biases[i] = biases[i] - scales[i] * rolling_mean[i] / (sqrtf(rolling_variance[i]) + .000001f);
+
+        int j;
+        for (j = 0; j < filter_size; ++j) {
+            int w_index = i*filter_size + j;
+            weights[w_index] = weights[w_index] * scales[i] / (sqrtf(rolling_variance[i]) + .000001f);
+        }
+    }
+}
+
+void batch_normalize_weights_bias_gpu(float *weights_gpu, float * bias_gpu, float *rolling_variance_gpu, float *rolling_mean_gpu, float *scale_gpu, 
+                                      float *variance_gpu, float *mean_gpu, int channel_size,int filter_size){
+    int N = channel_size;
+    batch_normalize_weights_bias_kernel<<<cuda_gridsize(N), BLOCK>>>(weights_gpu, bias_gpu, rolling_variance_gpu, rolling_mean_gpu, scale_gpu,
+                                                                     variance_gpu, mean_gpu, channel_size, filter_size);
+}
+
+__global__ void prune_kernel(int N, float *weights,float *update_weights, float threshold, int INCX)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N) {
+        if (fabs(weights[i*INCX])<threshold){
+            weights[i*INCX]=0;
+            update_weights[i*INCX] = 0;
+        }
+    }
+}
+
+void prune_gpu(int N, float * X, float * Y, float threhold,int INCY)
+{
+    prune_kernel<<<cuda_gridsize(N), BLOCK>>>(N, X,  Y,threhold, INCY);
+    check_error(cudaPeekAtLastError());
+}
+
+__global__ void set_zero_kernel(float *input, int size)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (i < size){
+        input[i] = 0;
+    }
+}
+
+void set_zero_gpu(float * X, int N)
+{
+    set_zero_kernel<<<cuda_gridsize(N), BLOCK>>>(X,  N);
+    check_error(cudaPeekAtLastError());
+}
+
+__global__ void backward_batch_normalize_weights_kernel(int N, float *weights_updates, float *variance, float *scales, int filters, int spatial)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N){
+        int index = i/spatial%filters;
+        weights_updates[i] = weights_updates[i]*scales[index]/(sqrt(variance[index]) + .000001f);
+            // weights_updates[weights_index] = weights_updates[weights_index]/(sqrt(variance[i]) + .000001f);
+	}
+}
+
+void backward_batch_normalize_weights_gpu(float *weights_updates, float *variance, float *scales, int filters, int spatial)
+{
+    int N = filters*spatial;
+    backward_batch_normalize_weights_kernel<<<cuda_gridsize(N), BLOCK>>>(N, weights_updates, variance, scales, filters, spatial);
+}
+
+__global__ void backward_scale_quant_kernel(int N, float *x_norm, float *weights_update, float *bias_update,  float *mean, float *variance, 
+                                            float *rolling_variance, int batch, int spatial, float *scale, float *scale_updates)
+{
+    int index = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (index < N*batch){
+        for(int j = 0; j < spatial; ++j){
+			int weights_index = index*spatial + j;
+            scale_updates[index] += weights_update[weights_index]*x_norm[weights_index]/(sqrt(rolling_variance[index]) + .000001f);              
+        }
+        scale_updates[index] = scale_updates[index] - bias_update[index] *mean[index]/(sqrt(variance[index]) + .000001f);
+    }
+}
+
+void backward_scale_quant_gpu(float *x_norm, float *weights_update, float *bias_update, float *mean, float *variance, float *rolling_variance,
+                              int batch, int channel, int spatial, float *scale, float *scale_updates)
+{
+    int N = channel;
+    backward_scale_quant_kernel<<<N, BLOCK>>>(N, x_norm, weights_update, bias_update, mean, variance, rolling_variance, batch, spatial, scale, scale_updates);
+    check_error(cudaPeekAtLastError());
+}
+
+__global__ void backward_batch_normalize_bias_kernel(float *bias_updates, float *rolling_variance, float *scales, int filters)
+{
+	int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < filters){
+        bias_updates[i] = (scales[i]*bias_updates[i])/(sqrt(rolling_variance[i]) + .000001f);
+        // bias_updates[i] = (bias_updates[i])/(sqrt(rolling_variance[i]) + .000001f);
+	}
+}
+
+void backward_batch_normalize_bias_gpu(float *bias_updates, float *rolling_variance, float *scales, int filters)
+{
+    int N = filters;
+    backward_batch_normalize_bias_kernel<<<cuda_gridsize(N), BLOCK>>>(bias_updates, rolling_variance, scales, filters);
+}
+
+
+
+/*************************************************************************************************************************
+                        This funtion is main to realize the fake quantization in the paper of
+
+                                "Quantization and Training of Neural Networks for Efficient 
+                                        Integer-Arithmetic-Only Inference"
+                        
+                         We propose an approach that simulates quantization effects in the 
+                         forward pass of training. Backpropagation still happens as usual, 
+                             and all weights and biases are stored in floating point
+ *************************************************************************************************************************/
+ __global__ void FakeQuantWithMinMaxChannel_kernel(int size_channel, float *inputs, uint8_t *input_int8, int size_feature, float *min_activ_value, float *max_activ_value, 
+                                                   float *quantzation_scale, uint8_t *quantization_zero_point, int func_type, float decay) 
+{
+    //printf("run in gpu \n");
+    //printf("channels %d\n", size_channel);
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < size_channel) {
+        printf("================================\n");
+        //Calculate min and max value of each kernel
+        float min_thisKernel_value = inputs[0];
+        float max_thisKernel_value = inputs[0];
+        int quant_min = -128; 
+        int quant_max = 127;
+        printf("------------------------------\n");
+        for(int j = 0; j < size_feature; ++j){
+            int index = i*size_feature+j;
+            // printf("index = %d, input = %f\n", index, inputs[index]);
+            max_thisKernel_value = max(inputs[index], max_thisKernel_value);
+            min_thisKernel_value = min(inputs[index], min_thisKernel_value);
+        }
+        printf("max value is %f, min value is %f\n",*max_activ_value, *min_activ_value);
+
+        //If this layer is activation, you need to update the min and max value with EMA 
+        if(func_type == ACTIV_QUANT){
+            *min_activ_value = *min_activ_value - ((*min_activ_value - min_thisKernel_value) * (1- decay));
+            *max_activ_value = *max_activ_value - ((*max_activ_value - max_thisKernel_value) * (1- decay));
+            // max_thisKernel_value = *max_activ_value;
+            // min_thisKernel_value = *min_activ_value;
+        }
+        // printf("max value is %f, min value is %f\n",max_thisKernel_value, min_thisKernel_value);
+        // If min and max are both zero, we should just return zero.
+        if (min_thisKernel_value == 0.0f && max_thisKernel_value == 0.0f) {
+            printf("ERROR, maybe you give an empty input array\n");
+        }
+
+        float nudged_scale = 0.0f;
+        //this is really nudge function
+        const float quant_min_float = (float)quant_min;
+        const float quant_max_float = (float)quant_max;
+        nudged_scale = (max_thisKernel_value - min_thisKernel_value) / (quant_max_float - quant_min_float);
+        const double initial_zero_point = quant_min - min_thisKernel_value / nudged_scale;
+        //printf("the scale is %f\n", nudged_scale);
+        //printf("get the zero point start\n");
+        //Store the S3 for activ quantization, convenient for us to quantization input in inference process
+        quantzation_scale[i] = nudged_scale;
+        uint8_t nudged_zero_point = 0;
+        if (initial_zero_point < quant_min) {
+            nudged_zero_point = quant_min;
+        } else if (initial_zero_point > quant_max) {
+            nudged_zero_point = quant_max;
+        } else {
+            nudged_zero_point = round(initial_zero_point);
+        }
+
+        quantization_zero_point[i] = nudged_zero_point;
+        //printf("get the zero point success\n");
+        const float nudged_scale_repl = nudged_scale;
+        for(int k = 0; k < size_feature; ++k){
+            int index_kernel = i*size_feature+k;
+            //float temp = inputs[index_kernel];
+            float clamped = max(min_thisKernel_value, min(max_thisKernel_value, inputs[index_kernel]));
+            float clamped_shifted = clamped - min_thisKernel_value;
+            if(func_type == WEIGHT_QUANT){
+                input_int8[index_kernel] = round(clamped_shifted / nudged_scale_repl + 0.01f);
+            }
+            inputs[index_kernel] = round(clamped_shifted / nudged_scale_repl + 0.01f) * nudged_scale_repl + min_thisKernel_value;
+            //printf("the diff is %f\n", inputs[index_kernel] - temp);
+        }
+    }
+}
+
+void FakeQuantWithMinMaxChannel_gpu(int channel_size, float *inputs, uint8_t *input_int8, int size, float *min_value, float *max_value, 
+                                    float *quant_scale, uint8_t *quant_zero_point, int layer_type, float decay)
+{
+    int N =channel_size;
+    FakeQuantWithMinMaxChannel_kernel<<<cuda_gridsize(N), BLOCK>>>(N, inputs, input_int8, size, min_value, max_value, quant_scale, quant_zero_point, layer_type, decay);
+    check_error(cudaPeekAtLastError());
 }
 
 __global__ void scale_bias_kernel(float *output, float *biases, int n, int size)
@@ -159,6 +357,89 @@ void dot_error_gpu(layer l)
 }
 */
 
+#ifdef MASK
+__global__ void mask_weights_kernel(int N, int channel, int size, float *weights, float *weights_mask, float *weights_mask_binary, float threhold, int key)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N) {
+		int s;
+		
+		int c = i%channel;  //channel
+		i /= channel;
+		int b = i;  //batch
+		int mask_index = b*channel + c;  
+		for(s = 0; s < size*size; s++){
+			int weight_index = (b*channel + c)*size*size + s;
+#if 0			
+            int zero_num = 0;            
+            if(weights_mask[mask_index] != 1){
+					printf("the mask is %f, zero num is %d\n", weights_mask[mask_index], zero_num);
+					zero_num = zero_num + 1;
+			}
+#endif			
+			weights[weight_index] *= weights_mask[mask_index];
+		}
+	}
+}
+
+void mask_weights_gpu(int N, int channel, int size, float * X, float * Y, float * Z, float threhold, int key)
+{
+
+    mask_weights_kernel<<<cuda_gridsize(N), BLOCK>>>(N, channel, size, X, Y, Z, threhold, key);
+    check_error(cudaPeekAtLastError());
+}
+
+__global__ void mask_backward_kernel(int N, int channel, int size, float *weights_result, float *weight_updates, float *weights_mask, float *mask_updates)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N) {
+		int s;
+		float sum =0;
+		int c = i%channel;	//channel
+		i /= channel;
+		int b = i;	//batch
+		int mask_index = b*channel + c;
+		for(s = 0; s < size*size; s++){
+            int weight_index = (b*channel + c)*size*size + s;
+            sum += weight_updates[weight_index]*weights_result[weight_index];
+		}
+		mask_updates[mask_index] += sum;
+		if(mask_updates[mask_index]<0){
+			mask_updates[mask_index]= -1 * mask_updates[mask_index];
+		}
+    }
+}
+
+
+void mask_backward_gpu(int N, int channel, int size, float * X, float * Y, float * Z, float *updates)
+{
+    mask_backward_kernel<<<cuda_gridsize(N), BLOCK>>>(N, channel, size, X, Y, Z, updates);
+    check_error(cudaPeekAtLastError());
+}
+
+__global__ void mask_update_kernel(int N, int channel, int size, float *weights_mask, float *mask_updates, float threshold)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N) {
+		int c = i%channel;	//channel
+		i /= channel;
+		int b = i;	//batch
+		int mask_index = b*channel + c;
+		if(mask_updates[mask_index] >= threshold){
+			weights_mask[mask_index] = 1;
+		}else{
+			weights_mask[mask_index] = 0;
+		}
+    }
+}
+
+void mask_update_gpu(int N, int channel, int size, float * X, float * Y, float threshold)
+{
+    mask_update_kernel<<<cuda_gridsize(N), BLOCK>>>(N, channel, size, X, Y, threshold);
+    check_error(cudaPeekAtLastError());
+}
+
+#endif
 
 __global__ void adam_kernel(int N, float *x, float *m, float *v, float B1, float B2, float rate, float eps, int t)
 {
@@ -171,13 +452,13 @@ __global__ void adam_kernel(int N, float *x, float *m, float *v, float B1, float
     x[index] = x[index] + rate * mhat / (sqrtf(vhat) + eps);
 }
 
-extern "C" void adam_gpu(int n, float *x, float *m, float *v, float B1, float B2, float rate, float eps, int t)
+void adam_gpu(int n, float *x, float *m, float *v, float B1, float B2, float rate, float eps, int t)
 {
     adam_kernel<<<cuda_gridsize(n), BLOCK>>>(n, x, m, v, B1, B2, rate, eps, t);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void adam_update_gpu(float *w, float *d, float *m, float *v, float B1, float B2, float eps, float decay, float rate, int n, int batch, int t)
+void adam_update_gpu(float *w, float *d, float *m, float *v, float B1, float B2, float eps, float decay, float rate, int n, int batch, int t)
 {
     scal_gpu(n, B1, m, 1);
     scal_gpu(n, B2, v, 1);
@@ -209,7 +490,7 @@ __global__ void normalize_delta_kernel(int N, float *x, float *mean, float *vari
     delta[index] = delta[index] * 1.f/(sqrtf(variance[f] + .00001f)) + variance_delta[f] * 2.f * (x[index] - mean[f]) / (spatial * batch) + mean_delta[f]/(spatial*batch);
 }
 
-extern "C" void normalize_delta_gpu(float *x, float *mean, float *variance, float *mean_delta, float *variance_delta, int batch, int filters, int spatial, float *delta)
+void normalize_delta_gpu(float *x, float *mean, float *variance, float *mean_delta, float *variance_delta, int batch, int filters, int spatial, float *delta)
 {
     size_t N = batch*filters*spatial;
     normalize_delta_kernel<<<cuda_gridsize(N), BLOCK>>>(N, x, mean, variance, mean_delta, variance_delta, batch, filters, spatial, delta);
@@ -317,19 +598,19 @@ __global__ void mean_delta_kernel(float *delta, float *variance, int batch, int 
     mean_delta[i] *= (-1.f/sqrtf(variance[i] + .00001f));
 }
 
-extern "C" void mean_delta_gpu(float *delta, float *variance, int batch, int filters, int spatial, float *mean_delta)
+void mean_delta_gpu(float *delta, float *variance, int batch, int filters, int spatial, float *mean_delta)
 {
     mean_delta_kernel<<<cuda_gridsize(filters), BLOCK>>>(delta, variance, batch, filters, spatial, mean_delta);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void fast_mean_delta_gpu(float *delta, float *variance, int batch, int filters, int spatial, float *mean_delta)
+void fast_mean_delta_gpu(float *delta, float *variance, int batch, int filters, int spatial, float *mean_delta)
 {
     fast_mean_delta_kernel<<<filters, BLOCK>>>(delta, variance, batch, filters, spatial, mean_delta);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void fast_variance_delta_gpu(float *x, float *delta, float *mean, float *variance, int batch, int filters, int spatial, float *variance_delta)
+void fast_variance_delta_gpu(float *x, float *delta, float *mean, float *variance, int batch, int filters, int spatial, float *variance_delta)
 {
     fast_variance_delta_kernel<<<filters, BLOCK>>>(x, delta, mean, variance, batch, filters, spatial, variance_delta);
     check_error(cudaPeekAtLastError());
@@ -449,6 +730,12 @@ __global__ void fill_kernel(int N, float ALPHA, float *X, int INCX)
     if(i < N) X[i*INCX] = ALPHA;
 }
 
+__global__ void fill_kernel_uint8(int N, uint8_t ALPHA, uint8_t *X, int INCX)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if(i < N) X[i*INCX] = ALPHA;
+}
+
 __global__ void copy_kernel(int N,  float *X, int OFFX, int INCX, float *Y, int OFFY, int INCY)
 {
     int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
@@ -462,7 +749,7 @@ __global__ void mul_kernel(int N, float *X, int INCX, float *Y, int INCY)
 }
 
 
-extern "C" void normalize_gpu(float *x, float *mean, float *variance, int batch, int filters, int spatial)
+void normalize_gpu(float *x, float *mean, float *variance, int batch, int filters, int spatial)
 {
     size_t N = batch*filters*spatial;
     normalize_kernel<<<cuda_gridsize(N), BLOCK>>>(N, x, mean, variance, batch, filters, spatial);
@@ -491,7 +778,7 @@ __global__ void l2norm_kernel(int N, float *x, float *dx, int batch, int filters
     }
 }
 
-extern "C" void l2normalize_gpu(float *x, float *dx, int batch, int filters, int spatial)
+void l2normalize_gpu(float *x, float *dx, int batch, int filters, int spatial)
 {
     size_t N = batch*spatial;
     l2norm_kernel<<<cuda_gridsize(N), BLOCK>>>(N, x, dx, batch, filters, spatial);
@@ -557,60 +844,60 @@ __global__ void  fast_variance_kernel(float *x, float *mean, int batch, int filt
     }
 }
 
-extern "C" void fast_mean_gpu(float *x, int batch, int filters, int spatial, float *mean)
+void fast_mean_gpu(float *x, int batch, int filters, int spatial, float *mean)
 {
     fast_mean_kernel<<<filters, BLOCK>>>(x, batch, filters, spatial, mean);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void fast_variance_gpu(float *x, float *mean, int batch, int filters, int spatial, float *variance)
+void fast_variance_gpu(float *x, float *mean, int batch, int filters, int spatial, float *variance)
 {
     fast_variance_kernel<<<filters, BLOCK>>>(x, mean, batch, filters, spatial, variance);
     check_error(cudaPeekAtLastError());
 }
 
 
-extern "C" void mean_gpu(float *x, int batch, int filters, int spatial, float *mean)
+void mean_gpu(float *x, int batch, int filters, int spatial, float *mean)
 {
     mean_kernel<<<cuda_gridsize(filters), BLOCK>>>(x, batch, filters, spatial, mean);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void variance_gpu(float *x, float *mean, int batch, int filters, int spatial, float *variance)
+void variance_gpu(float *x, float *mean, int batch, int filters, int spatial, float *variance)
 {
     variance_kernel<<<cuda_gridsize(filters), BLOCK>>>(x, mean, batch, filters, spatial, variance);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void axpy_gpu(int N, float ALPHA, float * X, int INCX, float * Y, int INCY)
+void axpy_gpu(int N, float ALPHA, float * X, int INCX, float * Y, int INCY)
 {
     axpy_gpu_offset(N, ALPHA, X, 0, INCX, Y, 0, INCY);
 }
 
-extern "C" void pow_gpu(int N, float ALPHA, float * X, int INCX, float * Y, int INCY)
+void pow_gpu(int N, float ALPHA, float * X, int INCX, float * Y, int INCY)
 {
     pow_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, INCX, Y, INCY);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void axpy_gpu_offset(int N, float ALPHA, float * X, int OFFX, int INCX, float * Y, int OFFY, int INCY)
+void axpy_gpu_offset(int N, float ALPHA, float * X, int OFFX, int INCX, float * Y, int OFFY, int INCY)
 {
     axpy_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, OFFX, INCX, Y, OFFY, INCY);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void copy_gpu(int N, float * X, int INCX, float * Y, int INCY)
+void copy_gpu(int N, float * X, int INCX, float * Y, int INCY)
 {
     copy_gpu_offset(N, X, 0, INCX, Y, 0, INCY);
 }
 
-extern "C" void mul_gpu(int N, float * X, int INCX, float * Y, int INCY)
+void mul_gpu(int N, float * X, int INCX, float * Y, int INCY)
 {
     mul_kernel<<<cuda_gridsize(N), BLOCK>>>(N, X, INCX, Y, INCY);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void copy_gpu_offset(int N, float * X, int OFFX, int INCX, float * Y, int OFFY, int INCY)
+void copy_gpu_offset(int N, float * X, int OFFX, int INCX, float * Y, int OFFY, int INCY)
 {
     copy_kernel<<<cuda_gridsize(N), BLOCK>>>(N, X, OFFX, INCX, Y, OFFY, INCY);
     check_error(cudaPeekAtLastError());
@@ -633,14 +920,14 @@ __global__ void flatten_kernel(int N, float *x, int spatial, int layers, int bat
     else out[i1] = x[i2];
 }
 
-extern "C" void flatten_gpu(float *x, int spatial, int layers, int batch, int forward, float *out)
+void flatten_gpu(float *x, int spatial, int layers, int batch, int forward, float *out)
 {
     int size = spatial*batch*layers;
     flatten_kernel<<<cuda_gridsize(size), BLOCK>>>(size, x, spatial, layers, batch, forward, out);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void reorg_gpu(float *x, int w, int h, int c, int batch, int stride, int forward, float *out)
+void reorg_gpu(float *x, int w, int h, int c, int batch, int stride, int forward, float *out)
 {
     int size = w*h*c*batch;
     reorg_kernel<<<cuda_gridsize(size), BLOCK>>>(size, x, w, h, c, batch, stride, forward, out);
@@ -653,7 +940,7 @@ __global__ void mask_kernel(int n,  float *x, float mask_num, float *mask, float
     if(i < n && mask[i] == mask_num) x[i] = val;
 }
 
-extern "C" void mask_gpu(int N, float * X, float mask_num, float * mask, float val)
+void mask_gpu(int N, float * X, float mask_num, float * mask, float val)
 {
     mask_kernel<<<cuda_gridsize(N), BLOCK>>>(N, X, mask_num, mask, val);
     check_error(cudaPeekAtLastError());
@@ -665,46 +952,52 @@ __global__ void scale_mask_kernel(int n,  float *x, float mask_num, float *mask,
     if(i < n && mask[i] == mask_num) x[i] *= scale;
 }
 
-extern "C" void scale_mask_gpu(int N, float * X, float mask_num, float * mask, float scale)
+void scale_mask_gpu(int N, float * X, float mask_num, float * mask, float scale)
 {
     scale_mask_kernel<<<cuda_gridsize(N), BLOCK>>>(N, X, mask_num, mask, scale);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void const_gpu(int N, float ALPHA, float * X, int INCX)
+void const_gpu(int N, float ALPHA, float * X, int INCX)
 {
     const_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, INCX);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void constrain_gpu(int N, float ALPHA, float * X, int INCX)
+void constrain_gpu(int N, float ALPHA, float * X, int INCX)
 {
     constrain_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, INCX);
     check_error(cudaPeekAtLastError());
 }
 
 
-extern "C" void add_gpu(int N, float ALPHA, float * X, int INCX)
+void add_gpu(int N, float ALPHA, float * X, int INCX)
 {
     add_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, INCX);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void scal_gpu(int N, float ALPHA, float * X, int INCX)
+void scal_gpu(int N, float ALPHA, float * X, int INCX)
 {
     scal_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, INCX);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void supp_gpu(int N, float ALPHA, float * X, int INCX)
+void supp_gpu(int N, float ALPHA, float * X, int INCX)
 {
     supp_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, INCX);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void fill_gpu(int N, float ALPHA, float * X, int INCX)
+void fill_gpu(int N, float ALPHA, float * X, int INCX)
 {
     fill_kernel<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, INCX);
+    check_error(cudaPeekAtLastError());
+}
+
+void fill_gpu_uint8(int N, uint8_t ALPHA, uint8_t * X, int INCX)
+{
+    fill_kernel_uint8<<<cuda_gridsize(N), BLOCK>>>(N, ALPHA, X, INCX);
     check_error(cudaPeekAtLastError());
 }
 
@@ -726,7 +1019,7 @@ __global__ void shortcut_kernel(int size, int minw, int minh, int minc, int stri
     //out[out_index] += add[add_index];
 }
 
-extern "C" void shortcut_gpu(int batch, int w1, int h1, int c1, float *add, int w2, int h2, int c2, float s1, float s2, float *out)
+void shortcut_gpu(int batch, int w1, int h1, int c1, float *add, int w2, int h2, int c2, float s1, float s2, float *out)
 {
     int minw = (w1 < w2) ? w1 : w2;
     int minh = (h1 < h2) ? h1 : h2;
@@ -761,7 +1054,7 @@ __global__ void smooth_l1_kernel(int n, float *pred, float *truth, float *delta,
     }
 }
 
-extern "C" void smooth_l1_gpu(int n, float *pred, float *truth, float *delta, float *error)
+void smooth_l1_gpu(int n, float *pred, float *truth, float *delta, float *error)
 {
     smooth_l1_kernel<<<cuda_gridsize(n), BLOCK>>>(n, pred, truth, delta, error);
     check_error(cudaPeekAtLastError());
@@ -778,7 +1071,7 @@ __global__ void softmax_x_ent_kernel(int n, float *pred, float *truth, float *de
     }
 }
 
-extern "C" void softmax_x_ent_gpu(int n, float *pred, float *truth, float *delta, float *error)
+void softmax_x_ent_gpu(int n, float *pred, float *truth, float *delta, float *error)
 {
     softmax_x_ent_kernel<<<cuda_gridsize(n), BLOCK>>>(n, pred, truth, delta, error);
     check_error(cudaPeekAtLastError());
@@ -795,7 +1088,7 @@ __global__ void logistic_x_ent_kernel(int n, float *pred, float *truth, float *d
     }
 }
 
-extern "C" void logistic_x_ent_gpu(int n, float *pred, float *truth, float *delta, float *error)
+void logistic_x_ent_gpu(int n, float *pred, float *truth, float *delta, float *error)
 {
     logistic_x_ent_kernel<<<cuda_gridsize(n), BLOCK>>>(n, pred, truth, delta, error);
     check_error(cudaPeekAtLastError());
@@ -811,7 +1104,7 @@ __global__ void l2_kernel(int n, float *pred, float *truth, float *delta, float 
     }
 }
 
-extern "C" void l2_gpu(int n, float *pred, float *truth, float *delta, float *error)
+void l2_gpu(int n, float *pred, float *truth, float *delta, float *error)
 {
     l2_kernel<<<cuda_gridsize(n), BLOCK>>>(n, pred, truth, delta, error);
     check_error(cudaPeekAtLastError());
@@ -827,7 +1120,7 @@ __global__ void l1_kernel(int n, float *pred, float *truth, float *delta, float 
     }
 }
 
-extern "C" void l1_gpu(int n, float *pred, float *truth, float *delta, float *error)
+void l1_gpu(int n, float *pred, float *truth, float *delta, float *error)
 {
     l1_kernel<<<cuda_gridsize(n), BLOCK>>>(n, pred, truth, delta, error);
     check_error(cudaPeekAtLastError());
@@ -842,7 +1135,7 @@ __global__ void wgan_kernel(int n, float *pred, float *truth, float *delta, floa
     }
 }
 
-extern "C" void wgan_gpu(int n, float *pred, float *truth, float *delta, float *error)
+void wgan_gpu(int n, float *pred, float *truth, float *delta, float *error)
 {
     wgan_kernel<<<cuda_gridsize(n), BLOCK>>>(n, pred, truth, delta, error);
     check_error(cudaPeekAtLastError());
@@ -873,7 +1166,7 @@ __global__ void deinter_kernel(int NX, float *X, int NY, float *Y, int B, float 
     }
 }
 
-extern "C" void deinter_gpu(int NX, float *X, int NY, float *Y, int B, float *OUT)
+void deinter_gpu(int NX, float *X, int NY, float *Y, int B, float *OUT)
 {
     deinter_kernel<<<cuda_gridsize((NX+NY)*B), BLOCK>>>(NX, X, NY, Y, B, OUT);
     check_error(cudaPeekAtLastError());
@@ -893,13 +1186,13 @@ __global__ void inter_kernel(int NX, float *X, int NY, float *Y, int B, float *O
     }
 }
 
-extern "C" void inter_gpu(int NX, float *X, int NY, float *Y, int B, float *OUT)
+void inter_gpu(int NX, float *X, int NY, float *Y, int B, float *OUT)
 {
     inter_kernel<<<cuda_gridsize((NX+NY)*B), BLOCK>>>(NX, X, NY, Y, B, OUT);
     check_error(cudaPeekAtLastError());
 }
 
-extern "C" void weighted_sum_gpu(float *a, float *b, float *s, int num, float *c)
+void weighted_sum_gpu(float *a, float *b, float *s, int num, float *c)
 {
     weighted_sum_kernel<<<cuda_gridsize(num), BLOCK>>>(num, a, b, s, c);
     check_error(cudaPeekAtLastError());
@@ -915,7 +1208,7 @@ __global__ void weighted_delta_kernel(int n, float *a, float *b, float *s, float
     }
 }
 
-extern "C" void weighted_delta_gpu(float *a, float *b, float *s, float *da, float *db, float *ds, int num, float *dc)
+void weighted_delta_gpu(float *a, float *b, float *s, float *da, float *db, float *ds, int num, float *dc)
 {
     weighted_delta_kernel<<<cuda_gridsize(num), BLOCK>>>(num, a, b, s, da, db, ds, dc);
     check_error(cudaPeekAtLastError());
@@ -929,7 +1222,7 @@ __global__ void mult_add_into_kernel(int n, float *a, float *b, float *c)
     }
 }
 
-extern "C" void mult_add_into_gpu(int num, float *a, float *b, float *c)
+void mult_add_into_gpu(int num, float *a, float *b, float *c)
 {
     mult_add_into_kernel<<<cuda_gridsize(num), BLOCK>>>(num, a, b, c);
     check_error(cudaPeekAtLastError());
@@ -969,7 +1262,7 @@ __global__ void softmax_tree_kernel(float *input, int spatial, int batch, int st
     softmax_device(input + goff + boff + s, group_size[g], temp, spatial, output + goff + boff + s);
 }
 
-extern "C" void softmax_tree(float *input, int spatial, int batch, int stride, float temp, float *output, tree hier)
+void softmax_tree(float *input, int spatial, int batch, int stride, float temp, float *output, tree hier)
 {
     int *tree_groups_size = cuda_make_int_array(hier.group_size, hier.groups);
     int *tree_groups_offset = cuda_make_int_array(hier.group_offset, hier.groups);
@@ -997,7 +1290,7 @@ __global__ void softmax_kernel(float *input, int n, int batch, int batch_offset,
     softmax_device(input + b*batch_offset + g*group_offset, n, temp, stride, output + b*batch_offset + g*group_offset);
 }
 
-extern "C" void softmax_gpu(float *input, int n, int batch, int batch_offset, int groups, int group_offset, int stride, float temp, float *output)
+void softmax_gpu(float *input, int n, int batch, int batch_offset, int groups, int group_offset, int stride, float temp, float *output)
 {
     softmax_kernel<<<cuda_gridsize(batch*groups), BLOCK>>>(input, n, batch, batch_offset, groups, group_offset, stride, temp, output);
     check_error(cudaPeekAtLastError());
@@ -1027,7 +1320,7 @@ __global__ void upsample_kernel(size_t N, float *x, int w, int h, int c, int bat
     if(forward) out[out_index] += scale * x[in_index];
     else atomicAdd(x+in_index, scale * out[out_index]);
 }
-extern "C" void upsample_gpu(float *in, int w, int h, int c, int batch, int stride, int forward, float scale, float *out)
+void upsample_gpu(float *in, int w, int h, int c, int batch, int stride, int forward, float scale, float *out)
 {
     size_t size = w*h*c*batch*stride*stride;
     upsample_kernel<<<cuda_gridsize(size), BLOCK>>>(size, in, w, h, c, batch, stride, forward, scale, out);

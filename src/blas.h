@@ -2,13 +2,10 @@
 #define BLAS_H
 #include "darknet.h"
 
-#define R_MULT (32)
-#define W_MAX_VAL (256/2 - 1)    // 7-bit (1-bit sign)
-#define I_MAX_VAL (256/2 - 1)    // 7-bit (1-bit sign)
-#define R_MAX_VAL (256*256/2 - 1)    // 31-bit (1-bit sign)
+int max_abs(int src, int max_val);
 
-float entropy_calibration(float *src_arr, const size_t size, const float bin_width, const int max_bin);
-void quantinization_and_get_multipliers(network *net);
+int clamp(int input, int min, int max);
+
 void flatten(float *x, int size, int layers, int batch, int forward);
 void pm(int M, int N, float *A);
 float *random_matrix(int rows, int cols);
@@ -27,6 +24,7 @@ void pow_cpu(int N, float ALPHA, float *X, int INCX, float *Y, int INCY);
 void mul_cpu(int N, float *X, int INCX, float *Y, int INCY);
 
 void fill_cpu(int N, float ALPHA, float * X, int INCX);
+void fill_cpu_int8(int N, int8_t ALPHA, int8_t *X, int INCX);
 float dot_cpu(int N, float *X, int INCX, float *Y, int INCY);
 int test_gpu_blas();
 void shortcut_cpu(int batch, int w1, int h1, int c1, float *add, int w2, int h2, int c2, float s1, float s2, float *out);
@@ -41,6 +39,8 @@ void  variance_delta_cpu(float *x, float *delta, float *mean, float *variance, i
 void normalize_delta_cpu(float *x, float *mean, float *variance, float *mean_delta, float *variance_delta, int batch, int filters, int spatial, float *delta);
 void batch_normalize_bias(float *biases, float *rolling_mean, float *rolling_variance, float *scales, int filters);
 void batch_normalize_weights(float *weights, float *variance, float *scales, int filters, int spatial);
+void FakeQuantWithMinMaxChannel(int size_channel, float *input, uint8_t *input_int8, int size_feature, float *min_activ_value, float *max_activ_value, 
+                                 float *quantzation_scale, uint8_t *quantization_zero_point, int func_type, float decay);              
 void l2normalize_cpu(float *x, float *dx, int batch, int filters, int spatial);
 
 void smooth_l1_cpu(int n, float *pred, float *truth, float *delta, float *error);
@@ -75,6 +75,18 @@ void mean_gpu(float *x, int batch, int filters, int spatial, float *mean);
 void variance_gpu(float *x, float *mean, int batch, int filters, int spatial, float *variance);
 void normalize_gpu(float *x, float *mean, float *variance, int batch, int filters, int spatial);
 void l2normalize_gpu(float *x, float *dx, int batch, int filters, int spatial);
+void mask_weights_gpu(int N, int channel, int size, float * X, float * Y, float * Z, float threhold, int key);
+void mask_backward_gpu(int N, int channel, int size, float * X, float * Y, float * Z, float *updates);
+void mask_update_gpu(int N, int channel, int size, float * X, float * Y, float threshold);
+void set_zero_gpu(float * X, int N);
+void backward_batch_normalize_weights_gpu(float *weights_updates, float *variance, float *scales, int filters, int spatial);
+void batch_normalize_weights_bias_gpu(float *weights_gpu, float * bias_gpu, float *rolling_variance_gpu, float *rolling_mean_gpu, float *scale_gpu, 
+                                      float *variance_gpu, float *mean_gpu, int channel_size,int filter_size);
+void backward_scale_quant_gpu(float *x_norm, float *weights_update, float *bias_update, float *mean, float *variance, float *rolling_variance,
+                              int batch, int channel, int spatial, float *scale, float *scale_updates);
+void prune_gpu(int N, float * X, float * Y, float threhold,int INCY);
+void FakeQuantWithMinMaxChannel_gpu(int channel_size, float *inputs, uint8_t *input_int8, int size, float *min_value, float *max_value, 
+                                    float *quant_scale, uint8_t *quant_zero_point, int layer_type, float decay);
 
 void normalize_delta_gpu(float *x, float *mean, float *variance, float *mean_delta, float *variance_delta, int batch, int filters, int spatial, float *delta);
 

@@ -1,11 +1,8 @@
 #include "cuda_runtime.h"
 #include "curand.h"
 #include "cublas_v2.h"
-
-extern "C" {
 #include "maxpool_layer.h"
 #include "cuda.h"
-}
 
 __global__ void forward_maxpool_layer_kernel(int n, int in_h, int in_w, int in_c, int stride, int size, int pad, float *input, float *output, int *indexes)
 {
@@ -84,23 +81,33 @@ __global__ void backward_maxpool_layer_kernel(int n, int in_h, int in_w, int in_
     prev_delta[index] += d;
 }
 
-extern "C" void forward_maxpool_layer_gpu(maxpool_layer layer, network net)
+void forward_maxpool_layer_gpu(maxpool_layer l, network net)
 {
-    int h = layer.out_h;
-    int w = layer.out_w;
-    int c = layer.c;
+    int h = l.out_h;
+    int w = l.out_w;
+    int c = l.c;
 
-    size_t n = h*w*c*layer.batch;
+    size_t n = h*w*c*l.batch;
 
-    forward_maxpool_layer_kernel<<<cuda_gridsize(n), BLOCK>>>(n, layer.h, layer.w, layer.c, layer.stride, layer.size, layer.pad, net.input_gpu, layer.output_gpu, layer.indexes_gpu);
+    forward_maxpool_layer_kernel<<<cuda_gridsize(n), BLOCK>>>(n, l.h, l.w, l.c, l.stride, l.size, l.pad, net.input_gpu, l.output_gpu, l.indexes_gpu);
     check_error(cudaPeekAtLastError());
+    
+    if(net.train && l.activ_quant_flag){
+        cuda_pull_array(l.output_gpu, l.output, l.out_c*l.out_w*l.out_h);
+        uint8_t input_fake_quant = 0;
+        FakeQuantWithMinMaxChannel(1, l.output, &input_fake_quant, l.out_c*l.out_w*l.out_h, l.min_activ_value, l.max_activ_value, 
+                                        l.activ_data_int8_scales, l.activ_data_int8_zero_point, ACTIV_QUANT, 0.999);
+        cuda_push_array(l.output_gpu, l.output, l.out_c*l.out_w*l.out_h);
+        // printf("scale is %f\n", *l.activ_data_int8_scales);
+        cuda_push_array(l.activ_data_int8_scales_gpu, l.activ_data_int8_scales, 1);
+        cuda_push_array_int8(l.activ_data_int8_zero_point_gpu, l.activ_data_int8_zero_point, 1);
+    }
 }
 
-extern "C" void backward_maxpool_layer_gpu(maxpool_layer layer, network net)
+void backward_maxpool_layer_gpu(maxpool_layer layer, network net)
 {
     size_t n = layer.h*layer.w*layer.c*layer.batch;
 
     backward_maxpool_layer_kernel<<<cuda_gridsize(n), BLOCK>>>(n, layer.h, layer.w, layer.c, layer.stride, layer.size, layer.pad, layer.delta_gpu, net.delta_gpu, layer.indexes_gpu);
     check_error(cudaPeekAtLastError());
 }
-

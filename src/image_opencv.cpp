@@ -6,9 +6,6 @@
 #include "image.h"
 
 using namespace cv;
-
-extern "C" {
-
 IplImage *image_to_ipl(image im)
 {
     int x,y,c;
@@ -128,8 +125,6 @@ void make_window(char *name, int w, int h, int fullscreen)
         resizeWindow(name, w, h);
         if(strcmp(name, "Demo") == 0) moveWindow(name, 0, 0);
     }
-}
-
 }
 
 #endif

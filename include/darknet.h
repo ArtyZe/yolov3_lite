@@ -4,9 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <pthread.h>
+#include <stdint.h>
 
-#define SECRET_NUM -1234
-extern int gpu_index;
 #ifdef GPU
     #define BLOCK 512
 
@@ -19,11 +18,22 @@ extern int gpu_index;
     #endif
 #endif
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+// #ifdef __cplusplus
+// extern "C" {
+// #endif
 
 #define SECRET_NUM -1234
+
+#define WEIGHT_QUANT 0
+#define ACTIV_QUANT 1
+
+#define  max(x,y)    ((x) > (y) ? (x) : (y))
+#define  min(x,y)    ((x) < (y) ? (x) : (y))
+
+#define R_MULT (32)
+#define W_MAX_VAL (256/2 - 1)    // 7-bit (1-bit sign)
+#define I_MAX_VAL (256/2 - 1)    // 7-bit (1-bit sign)
+#define R_MAX_VAL (256*256/2 - 1)    // 31-bit (1-bit sign)
 extern int gpu_index;
 
 typedef struct{
@@ -124,6 +134,42 @@ struct layer{
     void (*forward_gpu)   (struct layer, struct network);
     void (*backward_gpu)  (struct layer, struct network);
     void (*update_gpu)    (struct layer, update_args);
+
+    char *align_bit_weights;
+    float *mean_arr;
+    int align_bit_weights_size;
+    int lda_align;
+    int new_lda;
+    int bit_align;
+    
+    // google quantization
+    float input_data_int8_scales;
+    float *activ_data_int8_scales;
+    float *weight_data_int8_scales;
+    float *output_data_int8_scales;
+    float *biases_data_int8_scales;
+
+    uint32_t *input_sum_int;
+    uint32_t *weights_sum_int;
+
+    uint32_t mult_zero_point;
+
+    uint8_t input_data_int8_zero_point;
+    uint8_t *activ_data_int8_zero_point;
+    uint8_t *weight_data_int8_zero_point;
+    uint8_t *output_data_int8_zero_point;
+    uint8_t *biases_data_int8_zero_point;
+
+    int quant_activ;
+    int quant_weights;
+    float *min_activ_value;
+    float *max_activ_value;
+
+    int weight_quant_flag;
+    int activ_quant_flag;
+    //end google quantization
+
+    int layer_quantized;
     int batch_normalize;
     int shortcut;
     int batch;
@@ -209,10 +255,13 @@ struct layer{
     float temperature;
     float probability;
     float scale;
-    float weights_quant_multipler;
     float input_quant_multipler;
-	float output_multipler;
-	int8_t * output_int8;
+
+    float weights_quant_multipler;
+    float output_quant_multipler;
+	int8_t * input_int8;
+    int8_t * output_int8;
+    int16_t * output_int16;
     char  * cweights;
     int   * indexes;
     int   * input_layers;
@@ -235,23 +284,23 @@ struct layer{
 
     float * binary_weights;
 
+    uint8_t * input_quant;
+    float * input_backup;
+
     float * biases;
-    float *biases_quant;
+    float * biases_bn_backup;
+    uint32_t * biases_quant;
+    int16_t * biases_int16;
     float * bias_updates;
 
-	float * sign_scales;
     float * scales;
     float * scale_updates;
 
     float * weights;
+    float * weights_bn_backup;
+    uint8_t * weights_quant;
     int8_t * weights_int8;
     float * weight_updates;
-
-#ifdef LAYER_MASK
-	float * masks_ratio;
-	float * masks_ratio_updates;
-#endif	
-
 #ifdef MASK
 	float * weights_mask;
 	float * weights_result;
@@ -259,9 +308,10 @@ struct layer{
 	float * weight_mask_updates;
 #endif		
 
-
     float * delta;
     float * output;
+    float * output_bn_backup;
+    uint32_t * output_quant;
     float * loss;
     float * squared;
     float * norms;
@@ -364,6 +414,8 @@ struct layer{
     float *temp2_gpu;
     float *temp3_gpu;
 
+    float * input_backup_gpu;
+
     float *dh_gpu;
     float *hh_gpu;
     float *prev_cell_gpu;
@@ -381,6 +433,22 @@ struct layer{
     float *scale_m_gpu;
     float *bias_v_gpu;
     float *scale_v_gpu;
+
+    // google quantization
+    float *activ_data_int8_scales_gpu;
+    float *weight_data_int8_scales_gpu;
+    float *output_data_int8_scales_gpu;
+    float *biases_data_int8_scales_gpu;
+
+    uint8_t *activ_data_int8_zero_point_gpu;
+    uint8_t *weight_data_int8_zero_point_gpu;
+    uint8_t *output_data_int8_zero_point_gpu;
+    uint8_t *biases_data_int8_zero_point_gpu;
+
+    float *min_activ_value_gpu;
+    float *max_activ_value_gpu;
+
+    uint8_t * weights_quant_gpu;
 
     float * combine_gpu;
     float * combine_delta_gpu;
@@ -411,29 +479,28 @@ struct layer{
 
     float * x_gpu;
     float * x_norm_gpu;
-
 #ifdef MASK
-		float * weights_mask_gpu;
-		float * weights_result_gpu;
-		float * weights_mask_binary_gpu;
-		float * weight_mask_updates_gpu;
-#endif		
+    float * weights_mask_gpu;
+    float * weights_result_gpu;
+    float * weights_mask_binary_gpu;
+    float * weight_mask_updates_gpu;
+#endif
     float * weights_gpu;
+    float * weights_bn_backup_gpu;
     float * weight_updates_gpu;
     float * weight_change_gpu;
-    int8_t * weights_int8_gpu;
-    int8_t * weights_int8_int8x4_gpu;
 
     float * biases_gpu;
+    float * biases_bn_backup_gpu;
     float * bias_updates_gpu;
     float * bias_change_gpu;
 
-	float * sign_scales_gpu;
     float * scales_gpu;
     float * scale_updates_gpu;
     float * scale_change_gpu;
 
     float * output_gpu;
+    float * output_bn_backup_gpu;
     float * loss_gpu;
     float * delta_gpu;
     float * rand_gpu;
@@ -453,7 +520,8 @@ struct layer{
 #endif
 };
 
-void free_layer(layer);
+void init_layer(layer& l);
+void free_layer(layer l);
 
 typedef enum {
     CONSTANT, STEP, EXP, POLY, STEPS, SIG, RANDOM
@@ -461,16 +529,22 @@ typedef enum {
 
 typedef struct network{
     int n;
+    int net_quantized;
+    int calibrate_round;
     int batch;
     size_t *seen;
     int *t;
     float epoch;
     int subdivisions;
 	float *input_calibration;
+    float *output_scale;
+    uint8_t *output_zero_point;
 	int input_calibration_size;
     layer *layers;
     float *output;
     learning_rate_policy policy;
+
+    uint8_t * input_quant;
 
     float learning_rate;
     float momentum;
@@ -516,6 +590,7 @@ typedef struct network{
     float *truth;
     float *delta;
     float *workspace;
+    uint8_t *workspace_quant;
     int train;
     int index;
     float *cost;
@@ -636,6 +711,21 @@ typedef struct list{
     node *back;
 } list;
 
+typedef struct network_state {
+    float *truth;
+    float *input;
+    int8_t *input_int8;
+    float *delta;
+    float *workspace;
+    int train;
+    int index;
+    network net;
+#ifdef OPENCL
+    cl_mem input_ocl;
+    cl_mem workspace_ocl;
+#endif
+} network_state;
+
 pthread_t load_data(load_args args);
 list *read_data_cfg(char *filename);
 list *read_cfg(char *filename);
@@ -652,6 +742,7 @@ void update_network(network *net);
 float dot_cpu(int N, float *X, int INCX, float *Y, int INCY);
 void axpy_cpu(int N, float ALPHA, float *X, int INCX, float *Y, int INCY);
 void copy_cpu(int N, float *X, int INCX, float *Y, int INCY);
+void copy_cpu_int8(int N, int8_t *X, int INCX, int8_t *Y, int INCY);
 void scal_cpu(int N, float ALPHA, float *X, int INCX);
 void fill_cpu(int N, float ALPHA, float * X, int INCX);
 void normalize_cpu(float *x, float *mean, float *variance, int batch, int filters, int spatial);
@@ -661,15 +752,19 @@ int best_3d_shift_r(image a, image b, int min, int max);
 #ifdef GPU
 void axpy_gpu(int N, float ALPHA, float * X, int INCX, float * Y, int INCY);
 void fill_gpu(int N, float ALPHA, float * X, int INCX);
+void fill_gpu_uint8(int N, uint8_t ALPHA, uint8_t * X, int INCX);
 void scal_gpu(int N, float ALPHA, float * X, int INCX);
 void copy_gpu(int N, float * X, int INCX, float * Y, int INCY);
 
 void cuda_set_device(int n);
 void cuda_free(float *x_gpu);
 float *cuda_make_array(float *x, size_t n);
+uint8_t *cuda_make_array_uint8(uint8_t *x, size_t n);
 void cuda_pull_array(float *x_gpu, float *x, size_t n);
+void cuda_pull_array_int8(uint8_t *x_gpu, uint8_t *x, size_t n);
 float cuda_mag_array(float *x_gpu, size_t n);
 void cuda_push_array(float *x_gpu, float *x, size_t n);
+void cuda_push_array_int8(uint8_t *x_gpu, uint8_t *x, size_t n);
 
 void forward_network_gpu(network *net);
 void backward_network_gpu(network *net);
@@ -714,11 +809,14 @@ char *option_find_str(list *l, char *key, char *def);
 int option_find_int(list *l, char *key, int def);
 int option_find_int_quiet(list *l, char *key, int def);
 
-network *parse_network_cfg(char *filename);
+network *parse_network_cfg(char *filename, int quantized);
 void save_weights(network *net, char *filename);
 void load_weights(network *net, char *filename);
 void save_weights_upto(network *net, char *filename, int cutoff);
 void load_weights_upto(network *net, char *filename, int start, int cutoff);
+
+void init_layer(layer& l);
+void free_layer(layer l);
 
 void zero_objectness(layer l);
 void get_region_detections(layer l, int w, int h, int netw, int neth, float thresh, int *map, float tree_thresh, int relative, detection *dets);
@@ -773,9 +871,11 @@ matrix network_predict_data(network *net, data test);
 image **load_alphabet();
 image get_network_image(network *net);
 float *network_predict(network *net, float *input);
+void quantization_weights_and_activations(network *net);  
 
 int network_width(network *net);
 int network_height(network *net);
+void quantinization_and_get_multipliers(network *net);
 float *network_predict_image(network *net, image im);
 void network_detect(network *net, image im, float thresh, float hier_thresh, float nms, detection *dets);
 detection *get_network_boxes(network *net, int w, int h, float thresh, float hier, int *map, int relative, int *num);
@@ -834,7 +934,7 @@ size_t rand_size_t();
 float rand_normal();
 float rand_uniform(float min, float max);
 
-#ifdef __cplusplus
-}
-#endif
+// #ifdef __cplusplus
+// }
+// #endif
 #endif
